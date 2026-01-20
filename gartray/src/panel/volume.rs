@@ -1,7 +1,7 @@
-//! Volume control module using pactl
+//! Volume control module using wpctl (WirePlumber/PipeWire)
 //!
 //! Provides volume slider and mute toggle for audio output.
-//! Uses pactl commands - works with both PulseAudio and PipeWire.
+//! Uses wpctl commands which is available in the system PATH.
 
 use anyhow::{Context, Result};
 use std::process::Command;
@@ -14,11 +14,9 @@ pub struct VolumeState {
     pub volume: f64,
     /// Whether muted
     pub muted: bool,
-    /// Sink name
-    pub sink_name: String,
 }
 
-/// Volume module for controlling audio via pactl
+/// Volume module for controlling audio via wpctl
 pub struct VolumeModule {
     state: VolumeState,
     available: bool,
@@ -33,96 +31,66 @@ impl VolumeModule {
         }
     }
 
-    /// Connect and check if pactl is available
+    /// Connect and check if wpctl is available
     pub fn connect(&mut self) -> Result<()> {
-        // Check if pactl is available
-        let output = Command::new("pactl")
-            .arg("--version")
+        // Check if wpctl is available by getting current volume
+        let output = Command::new("wpctl")
+            .args(["get-volume", "@DEFAULT_AUDIO_SINK@"])
             .output()
-            .context("pactl not found")?;
+            .context("wpctl not found")?;
 
         if !output.status.success() {
-            anyhow::bail!("pactl not working");
+            anyhow::bail!("wpctl not working or no audio sink");
         }
 
         self.available = true;
-        info!("Connected to PulseAudio");
+        info!("Connected to PipeWire via wpctl");
 
-        // Get initial state
-        self.refresh()?;
+        // Parse initial state from the output we already have
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(vol_str) = stdout.strip_prefix("Volume: ") {
+            let parts: Vec<&str> = vol_str.trim().split_whitespace().collect();
+            if let Some(vol) = parts.first() {
+                if let Ok(v) = vol.parse::<f64>() {
+                    self.state.volume = v;
+                }
+            }
+            self.state.muted = stdout.contains("[MUTED]");
+        }
 
+        debug!("Initial volume: {:.0}%, muted: {}", self.state.volume * 100.0, self.state.muted);
         Ok(())
     }
 
-    /// Refresh volume state from pactl
+    /// Refresh volume state from wpctl
     pub fn refresh(&mut self) -> Result<()> {
         if !self.available {
             return Ok(());
         }
 
-        // Get default sink
-        if let Ok(sink) = self.get_default_sink() {
-            self.state.sink_name = sink;
-        }
+        // Get volume: wpctl get-volume @DEFAULT_AUDIO_SINK@
+        // Output: "Volume: 0.50" or "Volume: 0.50 [MUTED]"
+        let output = Command::new("wpctl")
+            .args(["get-volume", "@DEFAULT_AUDIO_SINK@"])
+            .output()
+            .context("Failed to get volume")?;
 
-        // Get volume and mute state
-        if let Ok((volume, muted)) = self.get_sink_volume(&self.state.sink_name) {
-            self.state.volume = volume;
-            self.state.muted = muted;
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // Parse "Volume: 0.50" or "Volume: 0.50 [MUTED]"
+            if let Some(vol_str) = stdout.strip_prefix("Volume: ") {
+                let parts: Vec<&str> = vol_str.trim().split_whitespace().collect();
+                if let Some(vol) = parts.first() {
+                    if let Ok(v) = vol.parse::<f64>() {
+                        self.state.volume = v;
+                    }
+                }
+                self.state.muted = stdout.contains("[MUTED]");
+            }
         }
 
         debug!("Volume: {:.0}%, muted: {}", self.state.volume * 100.0, self.state.muted);
         Ok(())
-    }
-
-    /// Get the default sink name
-    fn get_default_sink(&self) -> Result<String> {
-        let output = Command::new("pactl")
-            .args(["get-default-sink"])
-            .output()
-            .context("Failed to get default sink")?;
-
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-        } else {
-            anyhow::bail!("pactl get-default-sink failed")
-        }
-    }
-
-    /// Get volume and mute state for a sink
-    fn get_sink_volume(&self, sink: &str) -> Result<(f64, bool)> {
-        // Get volume
-        let output = Command::new("pactl")
-            .args(["get-sink-volume", sink])
-            .output()
-            .context("Failed to get sink volume")?;
-
-        let mut volume = 0.5;
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            // Parse output like "Volume: front-left: 65536 / 100% / 0.00 dB, ..."
-            if let Some(pct) = stdout.split('/').nth(1) {
-                if let Some(num) = pct.trim().strip_suffix('%') {
-                    if let Ok(v) = num.trim().parse::<f64>() {
-                        volume = v / 100.0;
-                    }
-                }
-            }
-        }
-
-        // Get mute state
-        let output = Command::new("pactl")
-            .args(["get-sink-mute", sink])
-            .output()
-            .context("Failed to get sink mute")?;
-
-        let mut muted = false;
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            muted = stdout.contains("yes");
-        }
-
-        Ok((volume, muted))
     }
 
     /// Set volume (0.0 - 1.0)
@@ -131,17 +99,11 @@ impl VolumeModule {
             return Ok(());
         }
 
-        let sink = &self.state.sink_name;
-        if sink.is_empty() {
-            return Ok(());
-        }
+        // wpctl set-volume @DEFAULT_AUDIO_SINK@ 0.50
+        let vol_str = format!("{:.2}", volume.clamp(0.0, 1.5));
 
-        // Convert to percentage
-        let pct = (volume.clamp(0.0, 1.5) * 100.0) as u32;
-        let volume_str = format!("{}%", pct);
-
-        let status = Command::new("pactl")
-            .args(["set-sink-volume", sink, &volume_str])
+        let status = Command::new("wpctl")
+            .args(["set-volume", "@DEFAULT_AUDIO_SINK@", &vol_str])
             .status()
             .context("Failed to set volume")?;
 
@@ -149,7 +111,7 @@ impl VolumeModule {
             self.state.volume = volume;
             debug!("Set volume to {:.0}%", volume * 100.0);
         } else {
-            warn!("pactl set-sink-volume failed");
+            warn!("wpctl set-volume failed");
         }
 
         Ok(())
@@ -161,13 +123,8 @@ impl VolumeModule {
             return Ok(());
         }
 
-        let sink = &self.state.sink_name;
-        if sink.is_empty() {
-            return Ok(());
-        }
-
-        let status = Command::new("pactl")
-            .args(["set-sink-mute", sink, "toggle"])
+        let status = Command::new("wpctl")
+            .args(["set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"])
             .status()
             .context("Failed to toggle mute")?;
 
@@ -175,7 +132,7 @@ impl VolumeModule {
             self.state.muted = !self.state.muted;
             debug!("Mute toggled to {}", self.state.muted);
         } else {
-            warn!("pactl set-sink-mute failed");
+            warn!("wpctl set-mute failed");
         }
 
         Ok(())
@@ -187,15 +144,10 @@ impl VolumeModule {
             return Ok(());
         }
 
-        let sink = &self.state.sink_name;
-        if sink.is_empty() {
-            return Ok(());
-        }
-
         let mute_str = if muted { "1" } else { "0" };
 
-        let status = Command::new("pactl")
-            .args(["set-sink-mute", sink, mute_str])
+        let status = Command::new("wpctl")
+            .args(["set-mute", "@DEFAULT_AUDIO_SINK@", mute_str])
             .status()
             .context("Failed to set mute")?;
 
