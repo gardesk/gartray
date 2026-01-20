@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use anyhow::{Context, Result};
-use gartk_x11::{Connection, Window, WindowConfig, WindowType};
+use gartk_x11::{Connection, Window, WindowConfig};
 use x11rb::connection::Connection as X11Connection;
 use x11rb::protocol::xproto::{
     self, Atom, AtomEnum, ClientMessageEvent, ConfigureWindowAux,
