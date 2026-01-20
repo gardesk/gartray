@@ -88,6 +88,8 @@ pub struct PopupPanel {
     dragging: Option<String>,
     /// Pending value during drag (avoids blocking PulseAudio calls)
     drag_value: f64,
+    /// Currently hovered button name (for hover effects)
+    hovered_button: Option<String>,
 }
 
 impl PopupPanel {
@@ -206,6 +208,7 @@ impl PopupPanel {
             toggle_buttons: Vec::new(),
             dragging: None,
             drag_value: 0.0,
+            hovered_button: None,
         })
     }
 
@@ -226,16 +229,26 @@ impl PopupPanel {
             info!("Panel window {} mapped at ({}, {})", window.id(), self.pos_x, self.pos_y);
 
             // Grab pointer to detect clicks outside the panel
-            let _ = self.conn.inner().grab_pointer(
-                true,  // owner_events - send events to owner window
+            // Use async grab mode to avoid blocking and pointer jumping
+            match self.conn.inner().grab_pointer(
+                false,  // owner_events - false to get all events to grab window
                 window.id(),
-                EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::BUTTON1_MOTION,
+                EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
                 GrabMode::ASYNC,
                 GrabMode::ASYNC,
                 x11rb::NONE,  // confine_to - don't confine
                 x11rb::NONE,  // cursor - use default
                 CURRENT_TIME,
-            );
+            ) {
+                Ok(cookie) => {
+                    if let Ok(reply) = cookie.reply() {
+                        debug!("Pointer grab status: {:?}", reply.status);
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to grab pointer: {}", e);
+                }
+            }
             self.conn.flush()?;
         }
 
@@ -467,13 +480,16 @@ impl PopupPanel {
             let bt_active = self.bluetooth.as_ref().map(|b| b.is_powered()).unwrap_or(false);
             let dnd_active = self.dnd.as_ref().map(|d| d.is_enabled()).unwrap_or(false);
 
+            // Helper to check if a button is hovered
+            let is_hovered = |name: &str| self.hovered_button.as_ref().map(|h| h == name).unwrap_or(false);
+
             // Row 1: WiFi, Bluetooth
-            self.draw_toggle_button(&ctx, "WiFi", "wifi", wifi_active, 16.0, grid_y, btn_width, btn_height)?;
+            self.draw_toggle_button(&ctx, "WiFi", "wifi", wifi_active, is_hovered("wifi"), 16.0, grid_y, btn_width, btn_height)?;
             self.toggle_buttons.push(ToggleButton {
                 name: "wifi".to_string(), x: 16.0, y: grid_y, width: btn_width, height: btn_height, active: wifi_active,
             });
 
-            self.draw_toggle_button(&ctx, "Bluetooth", "bluetooth", bt_active, 16.0 + btn_width + btn_spacing, grid_y, btn_width, btn_height)?;
+            self.draw_toggle_button(&ctx, "Bluetooth", "bluetooth", bt_active, is_hovered("bluetooth"), 16.0 + btn_width + btn_spacing, grid_y, btn_width, btn_height)?;
             self.toggle_buttons.push(ToggleButton {
                 name: "bluetooth".to_string(), x: 16.0 + btn_width + btn_spacing, y: grid_y, width: btn_width, height: btn_height, active: bt_active,
             });
@@ -486,12 +502,12 @@ impl PopupPanel {
             } else {
                 "N/A".to_string()
             };
-            self.draw_toggle_button(&ctx, &battery_text, "battery", false, 16.0, row2_y, btn_width, btn_height)?;
+            self.draw_toggle_button(&ctx, &battery_text, "battery", false, is_hovered("battery"), 16.0, row2_y, btn_width, btn_height)?;
             self.toggle_buttons.push(ToggleButton {
                 name: "battery".to_string(), x: 16.0, y: row2_y, width: btn_width, height: btn_height, active: false,
             });
 
-            self.draw_toggle_button(&ctx, "DND", "dnd", dnd_active, 16.0 + btn_width + btn_spacing, row2_y, btn_width, btn_height)?;
+            self.draw_toggle_button(&ctx, "DND", "dnd", dnd_active, is_hovered("dnd"), 16.0 + btn_width + btn_spacing, row2_y, btn_width, btn_height)?;
             self.toggle_buttons.push(ToggleButton {
                 name: "dnd".to_string(), x: 16.0 + btn_width + btn_spacing, y: row2_y, width: btn_width, height: btn_height, active: dnd_active,
             });
@@ -504,28 +520,28 @@ impl PopupPanel {
 
             // Shutdown
             let shutdown_x = 16.0;
-            self.draw_toggle_button(&ctx, "Shut", "power", false, shutdown_x, power_y, power_btn_width, power_btn_height)?;
+            self.draw_toggle_button(&ctx, "Shut", "power", false, is_hovered("shutdown"), shutdown_x, power_y, power_btn_width, power_btn_height)?;
             self.toggle_buttons.push(ToggleButton {
                 name: "shutdown".to_string(), x: shutdown_x, y: power_y, width: power_btn_width, height: power_btn_height, active: false,
             });
 
             // Restart
             let restart_x = shutdown_x + power_btn_width + power_spacing;
-            self.draw_toggle_button(&ctx, "Restart", "restart", false, restart_x, power_y, power_btn_width, power_btn_height)?;
+            self.draw_toggle_button(&ctx, "Restart", "restart", false, is_hovered("restart"), restart_x, power_y, power_btn_width, power_btn_height)?;
             self.toggle_buttons.push(ToggleButton {
                 name: "restart".to_string(), x: restart_x, y: power_y, width: power_btn_width, height: power_btn_height, active: false,
             });
 
             // Logout
             let logout_x = restart_x + power_btn_width + power_spacing;
-            self.draw_toggle_button(&ctx, "Logout", "logout", false, logout_x, power_y, power_btn_width, power_btn_height)?;
+            self.draw_toggle_button(&ctx, "Logout", "logout", false, is_hovered("logout"), logout_x, power_y, power_btn_width, power_btn_height)?;
             self.toggle_buttons.push(ToggleButton {
                 name: "logout".to_string(), x: logout_x, y: power_y, width: power_btn_width, height: power_btn_height, active: false,
             });
 
             // Hibernate/Sleep
             let hibernate_x = logout_x + power_btn_width + power_spacing;
-            self.draw_toggle_button(&ctx, "Sleep", "hibernate", false, hibernate_x, power_y, power_btn_width, power_btn_height)?;
+            self.draw_toggle_button(&ctx, "Sleep", "hibernate", false, is_hovered("hibernate"), hibernate_x, power_y, power_btn_width, power_btn_height)?;
             self.toggle_buttons.push(ToggleButton {
                 name: "hibernate".to_string(), x: hibernate_x, y: power_y, width: power_btn_width, height: power_btn_height, active: false,
             });
@@ -577,6 +593,7 @@ impl PopupPanel {
         label: &str,
         icon_type: &str,
         active: bool,
+        hovered: bool,
         x: f64,
         y: f64,
         width: f64,
@@ -586,15 +603,21 @@ impl PopupPanel {
         self.draw_rounded_rect(ctx, x, y, width, height, 8.0);
         if active {
             ctx.set_source_rgba(0.38, 0.68, 0.93, 0.3);  // Cyan tint when active
+        } else if hovered {
+            ctx.set_source_rgba(0.28, 0.28, 0.32, 1.0);  // Lighter when hovered
         } else {
             ctx.set_source_rgba(0.18, 0.18, 0.2, 1.0);
         }
         ctx.fill().ok();
 
-        // Border when active
-        if active {
+        // Border when active or hovered
+        if active || hovered {
             self.draw_rounded_rect(ctx, x + 1.0, y + 1.0, width - 2.0, height - 2.0, 7.0);
-            ctx.set_source_rgba(0.38, 0.68, 0.93, 0.8);
+            if active {
+                ctx.set_source_rgba(0.38, 0.68, 0.93, 0.8);
+            } else {
+                ctx.set_source_rgba(0.45, 0.45, 0.5, 0.6);  // Subtle border on hover
+            }
             ctx.set_line_width(2.0);
             ctx.stroke().ok();
         }
@@ -602,8 +625,8 @@ impl PopupPanel {
         // Draw icon using Cairo primitives
         let icon_x = x + width / 2.0;
         let icon_y = y + 25.0;
-        let alpha = if active { 1.0 } else { 0.7 };
-        self.draw_icon(ctx, icon_type, icon_x, icon_y, alpha);
+        let alpha = if active || hovered { 1.0 } else { 0.7 };
+        self.draw_icon(ctx, icon_type, icon_x, icon_y, alpha, active);
 
         // Label
         ctx.set_source_rgba(1.0, 1.0, 1.0, alpha);
@@ -616,7 +639,7 @@ impl PopupPanel {
     }
 
     /// Draw an icon using Cairo primitives
-    fn draw_icon(&self, ctx: &CairoContext, icon_type: &str, cx: f64, cy: f64, alpha: f64) {
+    fn draw_icon(&self, ctx: &CairoContext, icon_type: &str, cx: f64, cy: f64, alpha: f64, active: bool) {
         ctx.set_source_rgba(1.0, 1.0, 1.0, alpha);
         ctx.set_line_width(2.0);
         ctx.set_line_cap(cairo::LineCap::Round);
@@ -626,7 +649,7 @@ impl PopupPanel {
             "wifi" => self.draw_wifi_icon(ctx, cx, cy),
             "bluetooth" => self.draw_bluetooth_icon(ctx, cx, cy),
             "battery" => self.draw_battery_icon(ctx, cx, cy),
-            "dnd" => self.draw_dnd_icon(ctx, cx, cy),
+            "dnd" => self.draw_dnd_icon(ctx, cx, cy, active),
             "power" => self.draw_power_icon(ctx, cx, cy),
             "restart" => self.draw_restart_icon(ctx, cx, cy),
             "logout" => self.draw_logout_icon(ctx, cx, cy),
@@ -676,8 +699,8 @@ impl PopupPanel {
         ctx.fill().ok();
     }
 
-    /// Draw Do Not Disturb icon (bell with slash)
-    fn draw_dnd_icon(&self, ctx: &CairoContext, cx: f64, cy: f64) {
+    /// Draw Do Not Disturb icon (bell with slash when inactive)
+    fn draw_dnd_icon(&self, ctx: &CairoContext, cx: f64, cy: f64, active: bool) {
         let pi = std::f64::consts::PI;
         // Bell outline
         ctx.arc(cx, cy - 2.0, 8.0, pi, 2.0 * pi);
@@ -688,12 +711,14 @@ impl PopupPanel {
         // Bell clapper
         ctx.arc(cx, cy + 6.0, 2.0, 0.0, 2.0 * pi);
         ctx.fill().ok();
-        // Diagonal slash
-        ctx.set_source_rgba(0.9, 0.3, 0.3, 1.0);
-        ctx.set_line_width(2.5);
-        ctx.move_to(cx - 10.0, cy - 8.0);
-        ctx.line_to(cx + 10.0, cy + 8.0);
-        ctx.stroke().ok();
+        // Diagonal slash only when DND is OFF (not active)
+        if !active {
+            ctx.set_source_rgba(0.9, 0.3, 0.3, 1.0);
+            ctx.set_line_width(2.5);
+            ctx.move_to(cx - 10.0, cy - 8.0);
+            ctx.line_to(cx + 10.0, cy + 8.0);
+            ctx.stroke().ok();
+        }
     }
 
     /// Draw power (shutdown) icon
@@ -958,11 +983,15 @@ impl PopupPanel {
                     }
                 }
                 x11rb::protocol::Event::MotionNotify(e) => {
-                    if self.window.as_ref().map(|w| w.id()) == Some(e.event) {
-                        // Handle drag motion
-                        if self.dragging.is_some() {
-                            self.handle_drag(e.event_x as f64, e.event_y as f64)?;
-                        }
+                    let x = e.event_x as f64;
+                    let y = e.event_y as f64;
+
+                    // Handle drag motion
+                    if self.dragging.is_some() {
+                        self.handle_drag(x, y)?;
+                    } else {
+                        // Update hover state
+                        self.update_hover(x, y)?;
                     }
                 }
                 _ => {}
@@ -1099,6 +1128,27 @@ impl PopupPanel {
                 self.render()?;
             }
         }
+        Ok(())
+    }
+
+    /// Update hover state based on mouse position
+    fn update_hover(&mut self, x: f64, y: f64) -> Result<()> {
+        let mut new_hover: Option<String> = None;
+
+        // Check toggle buttons
+        for btn in &self.toggle_buttons {
+            if x >= btn.x && x < btn.x + btn.width && y >= btn.y && y < btn.y + btn.height {
+                new_hover = Some(btn.name.clone());
+                break;
+            }
+        }
+
+        // Only re-render if hover state changed
+        if new_hover != self.hovered_button {
+            self.hovered_button = new_hover;
+            self.render()?;
+        }
+
         Ok(())
     }
 
