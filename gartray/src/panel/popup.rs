@@ -14,6 +14,7 @@ use crate::config::PanelConfig;
 use crate::panel::volume::VolumeModule;
 use crate::panel::brightness::BrightnessModule;
 use crate::panel::battery::BatteryModule;
+use crate::panel::power::PowerModule;
 
 /// Monitor information
 #[derive(Debug, Clone)]
@@ -68,6 +69,8 @@ pub struct PopupPanel {
     brightness: Option<BrightnessModule>,
     /// Battery status module
     battery: Option<BatteryModule>,
+    /// Power actions module
+    power: Option<PowerModule>,
     /// Slider rows for hit testing (volume, brightness)
     slider_rows: Vec<SliderRow>,
     /// Toggle buttons for hit testing
@@ -122,6 +125,18 @@ impl PopupPanel {
             }
         }
 
+        // Initialize power module (always available)
+        let power = {
+            let mut p = PowerModule::new();
+            if let Err(e) = p.connect() {
+                warn!("Failed to connect power module: {}", e);
+                None
+            } else {
+                info!("Power module initialized");
+                Some(p)
+            }
+        };
+
         Ok(Self {
             conn,
             window: None,
@@ -136,6 +151,7 @@ impl PopupPanel {
             volume,
             brightness,
             battery,
+            power,
             slider_rows: Vec::new(),
             toggle_buttons: Vec::new(),
             dragging: None,
@@ -909,7 +925,7 @@ impl PopupPanel {
         for btn in &buttons {
             if x >= btn.x && x < btn.x + btn.width && y >= btn.y && y < btn.y + btn.height {
                 info!("Toggle button '{}' clicked", btn.name);
-                // TODO: Implement actual toggle functionality for WiFi, Bluetooth, etc.
+                self.handle_toggle_action(&btn.name)?;
                 self.render()?;
                 return Ok(());
             }
@@ -944,6 +960,61 @@ impl PopupPanel {
             }
         }
 
+        Ok(())
+    }
+
+    /// Handle toggle button action
+    fn handle_toggle_action(&mut self, name: &str) -> Result<()> {
+        match name {
+            // Power actions
+            "shutdown" => {
+                if let Some(ref power) = self.power {
+                    if let Err(e) = power.shutdown() {
+                        warn!("Shutdown failed: {}", e);
+                    }
+                }
+            }
+            "restart" => {
+                if let Some(ref power) = self.power {
+                    if let Err(e) = power.reboot() {
+                        warn!("Reboot failed: {}", e);
+                    }
+                }
+            }
+            "logout" => {
+                if let Some(ref power) = self.power {
+                    if let Err(e) = power.logout() {
+                        warn!("Logout failed: {}", e);
+                    }
+                }
+            }
+            "hibernate" => {
+                if let Some(ref power) = self.power {
+                    if let Err(e) = power.hibernate() {
+                        warn!("Hibernate failed: {}", e);
+                    }
+                }
+            }
+            // TODO: NetworkManager D-Bus for WiFi
+            "wifi" => {
+                info!("WiFi toggle not yet implemented (needs NetworkManager D-Bus)");
+            }
+            // TODO: BlueZ D-Bus for Bluetooth
+            "bluetooth" => {
+                info!("Bluetooth toggle not yet implemented (needs BlueZ D-Bus)");
+            }
+            // TODO: Notification daemon for DND
+            "dnd" => {
+                info!("DND toggle not yet implemented");
+            }
+            // Battery is just a status display, not a toggle
+            "battery" => {
+                info!("Battery clicked (status only)");
+            }
+            _ => {
+                debug!("Unknown toggle button: {}", name);
+            }
+        }
         Ok(())
     }
 

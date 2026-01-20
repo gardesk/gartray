@@ -6,11 +6,13 @@ pub mod popup;
 pub mod volume;
 pub mod brightness;
 pub mod battery;
+pub mod power;
 
 pub use popup::PopupPanel;
 pub use volume::VolumeModule;
 pub use brightness::BrightnessModule;
 pub use battery::BatteryModule;
+pub use power::PowerModule;
 
 /// Panel module trait
 pub trait PanelModule {
