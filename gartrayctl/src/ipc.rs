@@ -17,9 +17,19 @@ fn socket_path() -> PathBuf {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
-    Show,
+    Show {
+        #[serde(default)]
+        x: i32,
+        #[serde(default)]
+        y: i32,
+    },
     Hide,
-    Toggle,
+    Toggle {
+        #[serde(default)]
+        x: i32,
+        #[serde(default)]
+        y: i32,
+    },
     Reload,
     Status,
     Quit,
@@ -44,10 +54,11 @@ pub fn send_command(command: &str) -> Result<()> {
     let mut stream = UnixStream::connect(&path)
         .with_context(|| "Failed to connect to gartray daemon")?;
 
+    // CLI commands use default position (0,0) which the daemon interprets as "use default position"
     let cmd = match command {
-        "show" => Command::Show,
+        "show" => Command::Show { x: 0, y: 0 },
         "hide" => Command::Hide,
-        "toggle" => Command::Toggle,
+        "toggle" => Command::Toggle { x: 0, y: 0 },
         "reload" => Command::Reload,
         "status" => Command::Status,
         "quit" => Command::Quit,

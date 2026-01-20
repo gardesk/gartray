@@ -22,12 +22,22 @@ pub fn socket_path() -> PathBuf {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
-    /// Show the quick settings panel
-    Show,
+    /// Show the quick settings panel at position
+    Show {
+        #[serde(default)]
+        x: i32,
+        #[serde(default)]
+        y: i32,
+    },
     /// Hide the quick settings panel
     Hide,
-    /// Toggle panel visibility
-    Toggle,
+    /// Toggle panel visibility at position
+    Toggle {
+        #[serde(default)]
+        x: i32,
+        #[serde(default)]
+        y: i32,
+    },
     /// Reload configuration
     Reload,
     /// Get daemon status
@@ -175,6 +185,11 @@ fn handle_client(mut stream: UnixStream, tx: Sender<Command>) -> Result<()> {
 
 /// Send a command to the running daemon (client side)
 pub async fn send_command(command: &str) -> Result<()> {
+    send_command_with_pos(command, 0, 0).await
+}
+
+/// Send a command with position to the running daemon
+pub async fn send_command_with_pos(command: &str, x: i32, y: i32) -> Result<()> {
     let path = socket_path();
 
     if !path.exists() {
@@ -185,10 +200,9 @@ pub async fn send_command(command: &str) -> Result<()> {
         .with_context(|| "Failed to connect to gartray daemon")?;
 
     let cmd = match command {
-        "show" => Command::Show,
+        "show" => Command::Show { x, y },
         "hide" => Command::Hide,
-        "toggle" => Command::Toggle,
-        "panel" => Command::Toggle,
+        "toggle" | "panel" => Command::Toggle { x, y },
         "reload" => Command::Reload,
         "status" => Command::Status,
         "quit" => Command::Quit,
