@@ -243,12 +243,10 @@ impl Daemon {
     fn handle_ipc_command(&mut self, cmd: Command) {
         debug!("Handling IPC command: {:?}", cmd);
         match cmd {
-            Command::Show => {
-                info!("Showing panel");
+            Command::Show { x, y } => {
+                info!("Showing panel at ({}, {})", x, y);
                 if let Some(ref mut panel) = self.panel {
-                    // Show near screen center for now
-                    // TODO: Get tray position or mouse position
-                    let _ = panel.show(800, 50);
+                    let _ = panel.show(x, y);
                     let _ = panel.render();
                 }
             }
@@ -258,14 +256,14 @@ impl Daemon {
                     let _ = panel.hide();
                 }
             }
-            Command::Toggle => {
+            Command::Toggle { x, y } => {
                 if let Some(ref mut panel) = self.panel {
                     let visible = panel.is_visible();
-                    info!("Panel visibility toggled: {} -> {}", visible, !visible);
+                    info!("Panel toggle at ({}, {}): {} -> {}", x, y, visible, !visible);
                     if visible {
                         let _ = panel.hide();
                     } else {
-                        let _ = panel.show(800, 50);
+                        let _ = panel.show(x, y);
                         let _ = panel.render();
                     }
                 }
@@ -313,6 +311,13 @@ impl Daemon {
                         warn!("Failed to render SNI icons: {}", e);
                     }
                 }
+            }
+        }
+
+        // Process panel events
+        if let Some(ref mut panel) = self.panel {
+            if let Err(e) = panel.process_events() {
+                warn!("Panel event error: {}", e);
             }
         }
 
