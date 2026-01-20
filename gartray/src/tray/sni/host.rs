@@ -110,6 +110,20 @@ impl StatusNotifierHost {
     pub fn on_item_unregistered(&mut self, service: &str) {
         self.remove_item(service);
     }
+
+    /// Refresh all items (call periodically to update icons)
+    pub async fn refresh_all(&mut self) {
+        for item in self.items.values_mut() {
+            if let Err(e) = item.refresh().await {
+                warn!("Failed to refresh SNI item {}: {}", item.id, e);
+            }
+        }
+    }
+
+    /// Get mutable access to items for updates
+    pub fn items_mut(&mut self) -> impl Iterator<Item = &mut SniItem> {
+        self.items.values_mut()
+    }
 }
 
 /// Parse service string into bus name and object path

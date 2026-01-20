@@ -55,6 +55,22 @@ trait StatusNotifierItem {
 
     /// Scroll event
     fn scroll(&self, delta: i32, orientation: &str) -> zbus::Result<()>;
+
+    /// Signal: Icon changed
+    #[zbus(signal)]
+    fn new_icon(&self) -> zbus::Result<()>;
+
+    /// Signal: Title changed
+    #[zbus(signal)]
+    fn new_title(&self) -> zbus::Result<()>;
+
+    /// Signal: Status changed
+    #[zbus(signal)]
+    fn new_status(&self, status: &str) -> zbus::Result<()>;
+
+    /// Signal: Tooltip changed
+    #[zbus(signal)]
+    fn new_tool_tip(&self) -> zbus::Result<()>;
 }
 
 /// Represents a StatusNotifierItem
@@ -70,6 +86,8 @@ pub struct SniItem {
     pub title: Option<String>,
     /// Cached status
     pub status: String,
+    /// Whether the item needs refresh (icon changed, etc.)
+    pub needs_refresh: bool,
 }
 
 impl SniItem {
@@ -114,7 +132,20 @@ impl SniItem {
             icon_pixmap,
             title,
             status,
+            needs_refresh: false,
         })
+    }
+
+    /// Mark the item as needing refresh
+    pub fn mark_needs_refresh(&mut self) {
+        self.needs_refresh = true;
+    }
+
+    /// Check and clear the needs_refresh flag
+    pub fn check_and_clear_refresh(&mut self) -> bool {
+        let needs = self.needs_refresh;
+        self.needs_refresh = false;
+        needs
     }
 
     /// Refresh item properties
