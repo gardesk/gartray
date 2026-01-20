@@ -83,9 +83,9 @@ impl PopupPanel {
     pub fn new(config: &PanelConfig) -> Result<Self> {
         let conn = Connection::connect(None).context("Failed to connect to X11")?;
 
-        // Calculate height: header + toggle grid (2 rows) + volume slider
-        // Header: 50px, Toggle grid: 2x70=140px, Slider: 60px, Padding: 20px
-        let height = 270;
+        // Calculate height: header + toggle grid (2 rows) + power buttons + volume slider
+        // Header: 50px, Toggle grid: 2x68=136px, Power row: 55px, Slider: 50px, Padding
+        let height = 320;
 
         // Initialize modules based on config
         let mut volume = None;
@@ -397,12 +397,12 @@ impl PopupPanel {
             let btn_spacing = 8.0;
 
             // Row 1: WiFi, Bluetooth
-            self.draw_toggle_button(&ctx, "WiFi", "📶", false, 16.0, grid_y, btn_width, btn_height)?;
+            self.draw_toggle_button(&ctx, "WiFi", "wifi", false, 16.0, grid_y, btn_width, btn_height)?;
             self.toggle_buttons.push(ToggleButton {
                 name: "wifi".to_string(), x: 16.0, y: grid_y, width: btn_width, height: btn_height, active: false,
             });
 
-            self.draw_toggle_button(&ctx, "Bluetooth", "🔵", false, 16.0 + btn_width + btn_spacing, grid_y, btn_width, btn_height)?;
+            self.draw_toggle_button(&ctx, "Bluetooth", "bluetooth", false, 16.0 + btn_width + btn_spacing, grid_y, btn_width, btn_height)?;
             self.toggle_buttons.push(ToggleButton {
                 name: "bluetooth".to_string(), x: 16.0 + btn_width + btn_spacing, y: grid_y, width: btn_width, height: btn_height, active: false,
             });
@@ -415,18 +415,52 @@ impl PopupPanel {
             } else {
                 "N/A".to_string()
             };
-            self.draw_toggle_button(&ctx, &battery_text, "🔋", false, 16.0, row2_y, btn_width, btn_height)?;
+            self.draw_toggle_button(&ctx, &battery_text, "battery", false, 16.0, row2_y, btn_width, btn_height)?;
             self.toggle_buttons.push(ToggleButton {
                 name: "battery".to_string(), x: 16.0, y: row2_y, width: btn_width, height: btn_height, active: false,
             });
 
-            self.draw_toggle_button(&ctx, "DND", "🔕", false, 16.0 + btn_width + btn_spacing, row2_y, btn_width, btn_height)?;
+            self.draw_toggle_button(&ctx, "DND", "dnd", false, 16.0 + btn_width + btn_spacing, row2_y, btn_width, btn_height)?;
             self.toggle_buttons.push(ToggleButton {
                 name: "dnd".to_string(), x: 16.0 + btn_width + btn_spacing, y: row2_y, width: btn_width, height: btn_height, active: false,
             });
 
+            // === Power Button Row (4 smaller buttons) ===
+            let power_y = row2_y + btn_height + btn_spacing;
+            let power_btn_width = (self.width as f64 - 56.0) / 4.0;  // 4 columns
+            let power_btn_height = 50.0;
+            let power_spacing = 8.0;
+
+            // Shutdown
+            let shutdown_x = 16.0;
+            self.draw_toggle_button(&ctx, "Shut", "power", false, shutdown_x, power_y, power_btn_width, power_btn_height)?;
+            self.toggle_buttons.push(ToggleButton {
+                name: "shutdown".to_string(), x: shutdown_x, y: power_y, width: power_btn_width, height: power_btn_height, active: false,
+            });
+
+            // Restart
+            let restart_x = shutdown_x + power_btn_width + power_spacing;
+            self.draw_toggle_button(&ctx, "Restart", "restart", false, restart_x, power_y, power_btn_width, power_btn_height)?;
+            self.toggle_buttons.push(ToggleButton {
+                name: "restart".to_string(), x: restart_x, y: power_y, width: power_btn_width, height: power_btn_height, active: false,
+            });
+
+            // Logout
+            let logout_x = restart_x + power_btn_width + power_spacing;
+            self.draw_toggle_button(&ctx, "Logout", "logout", false, logout_x, power_y, power_btn_width, power_btn_height)?;
+            self.toggle_buttons.push(ToggleButton {
+                name: "logout".to_string(), x: logout_x, y: power_y, width: power_btn_width, height: power_btn_height, active: false,
+            });
+
+            // Hibernate/Sleep
+            let hibernate_x = logout_x + power_btn_width + power_spacing;
+            self.draw_toggle_button(&ctx, "Sleep", "hibernate", false, hibernate_x, power_y, power_btn_width, power_btn_height)?;
+            self.toggle_buttons.push(ToggleButton {
+                name: "hibernate".to_string(), x: hibernate_x, y: power_y, width: power_btn_width, height: power_btn_height, active: false,
+            });
+
             // === Volume Slider ===
-            let slider_y = row2_y + btn_height + 16.0;
+            let slider_y = power_y + power_btn_height + 12.0;
             let slider_x = 70.0;
             let slider_width = self.width as f64 - slider_x - 24.0;
             let slider_height = 42.0;
@@ -465,12 +499,12 @@ impl PopupPanel {
         Ok(())
     }
 
-    /// Draw a toggle button
+    /// Draw a toggle button with Cairo-rendered icon
     fn draw_toggle_button(
         &self,
         ctx: &CairoContext,
         label: &str,
-        icon: &str,
+        icon_type: &str,
         active: bool,
         x: f64,
         y: f64,
@@ -494,19 +528,156 @@ impl PopupPanel {
             ctx.stroke().ok();
         }
 
-        // Icon
-        ctx.set_source_rgba(1.0, 1.0, 1.0, if active { 1.0 } else { 0.7 });
-        ctx.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
-        ctx.set_font_size(20.0);
-        ctx.move_to(x + width / 2.0 - 10.0, y + 28.0);
-        ctx.show_text(icon).ok();
+        // Draw icon using Cairo primitives
+        let icon_x = x + width / 2.0;
+        let icon_y = y + 25.0;
+        let alpha = if active { 1.0 } else { 0.7 };
+        self.draw_icon(ctx, icon_type, icon_x, icon_y, alpha);
 
         // Label
+        ctx.set_source_rgba(1.0, 1.0, 1.0, alpha);
+        ctx.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
         ctx.set_font_size(11.0);
         ctx.move_to(x + width / 2.0 - (label.len() as f64 * 3.0), y + height - 10.0);
         ctx.show_text(label).ok();
 
         Ok(())
+    }
+
+    /// Draw an icon using Cairo primitives
+    fn draw_icon(&self, ctx: &CairoContext, icon_type: &str, cx: f64, cy: f64, alpha: f64) {
+        ctx.set_source_rgba(1.0, 1.0, 1.0, alpha);
+        ctx.set_line_width(2.0);
+        ctx.set_line_cap(cairo::LineCap::Round);
+        ctx.set_line_join(cairo::LineJoin::Round);
+
+        match icon_type {
+            "wifi" => self.draw_wifi_icon(ctx, cx, cy),
+            "bluetooth" => self.draw_bluetooth_icon(ctx, cx, cy),
+            "battery" => self.draw_battery_icon(ctx, cx, cy),
+            "dnd" => self.draw_dnd_icon(ctx, cx, cy),
+            "power" => self.draw_power_icon(ctx, cx, cy),
+            "restart" => self.draw_restart_icon(ctx, cx, cy),
+            "logout" => self.draw_logout_icon(ctx, cx, cy),
+            "hibernate" => self.draw_hibernate_icon(ctx, cx, cy),
+            _ => {}
+        }
+    }
+
+    /// Draw WiFi signal bars icon
+    fn draw_wifi_icon(&self, ctx: &CairoContext, cx: f64, cy: f64) {
+        let pi = std::f64::consts::PI;
+        // Draw concentric arcs for signal strength
+        for i in 0..3 {
+            let radius = 6.0 + (i as f64 * 5.0);
+            ctx.arc(cx, cy + 8.0, radius, -pi * 0.75, -pi * 0.25);
+            ctx.stroke().ok();
+        }
+        // Center dot
+        ctx.arc(cx, cy + 8.0, 2.0, 0.0, 2.0 * pi);
+        ctx.fill().ok();
+    }
+
+    /// Draw Bluetooth icon (runic B)
+    fn draw_bluetooth_icon(&self, ctx: &CairoContext, cx: f64, cy: f64) {
+        // Draw the Bluetooth rune shape
+        ctx.move_to(cx, cy - 10.0);
+        ctx.line_to(cx, cy + 10.0);
+        ctx.move_to(cx, cy - 10.0);
+        ctx.line_to(cx + 6.0, cy - 4.0);
+        ctx.line_to(cx - 6.0, cy + 4.0);
+        ctx.move_to(cx, cy + 10.0);
+        ctx.line_to(cx + 6.0, cy + 4.0);
+        ctx.line_to(cx - 6.0, cy - 4.0);
+        ctx.stroke().ok();
+    }
+
+    /// Draw battery icon
+    fn draw_battery_icon(&self, ctx: &CairoContext, cx: f64, cy: f64) {
+        // Battery body
+        self.draw_rounded_rect(ctx, cx - 10.0, cy - 6.0, 18.0, 12.0, 2.0);
+        ctx.stroke().ok();
+        // Battery tip
+        ctx.rectangle(cx + 8.0, cy - 3.0, 3.0, 6.0);
+        ctx.fill().ok();
+        // Fill level (mock 75%)
+        ctx.rectangle(cx - 8.0, cy - 4.0, 12.0, 8.0);
+        ctx.fill().ok();
+    }
+
+    /// Draw Do Not Disturb icon (bell with slash)
+    fn draw_dnd_icon(&self, ctx: &CairoContext, cx: f64, cy: f64) {
+        let pi = std::f64::consts::PI;
+        // Bell outline
+        ctx.arc(cx, cy - 2.0, 8.0, pi, 2.0 * pi);
+        ctx.line_to(cx + 8.0, cy + 4.0);
+        ctx.line_to(cx - 8.0, cy + 4.0);
+        ctx.close_path();
+        ctx.stroke().ok();
+        // Bell clapper
+        ctx.arc(cx, cy + 6.0, 2.0, 0.0, 2.0 * pi);
+        ctx.fill().ok();
+        // Diagonal slash
+        ctx.set_source_rgba(0.9, 0.3, 0.3, 1.0);
+        ctx.set_line_width(2.5);
+        ctx.move_to(cx - 10.0, cy - 8.0);
+        ctx.line_to(cx + 10.0, cy + 8.0);
+        ctx.stroke().ok();
+    }
+
+    /// Draw power (shutdown) icon
+    fn draw_power_icon(&self, ctx: &CairoContext, cx: f64, cy: f64) {
+        let pi = std::f64::consts::PI;
+        // Power circle (open at top)
+        ctx.arc(cx, cy, 8.0, pi * 0.3, pi * 2.7);
+        ctx.stroke().ok();
+        // Vertical line at top
+        ctx.move_to(cx, cy - 10.0);
+        ctx.line_to(cx, cy - 2.0);
+        ctx.stroke().ok();
+    }
+
+    /// Draw restart icon (circular arrow)
+    fn draw_restart_icon(&self, ctx: &CairoContext, cx: f64, cy: f64) {
+        let pi = std::f64::consts::PI;
+        // Circular arrow
+        ctx.arc(cx, cy, 8.0, pi * 0.5, pi * 2.2);
+        ctx.stroke().ok();
+        // Arrow head
+        ctx.move_to(cx + 8.0, cy);
+        ctx.line_to(cx + 4.0, cy - 4.0);
+        ctx.move_to(cx + 8.0, cy);
+        ctx.line_to(cx + 4.0, cy + 4.0);
+        ctx.stroke().ok();
+    }
+
+    /// Draw logout icon (door with arrow)
+    fn draw_logout_icon(&self, ctx: &CairoContext, cx: f64, cy: f64) {
+        // Door frame
+        ctx.move_to(cx - 4.0, cy - 10.0);
+        ctx.line_to(cx - 8.0, cy - 10.0);
+        ctx.line_to(cx - 8.0, cy + 10.0);
+        ctx.line_to(cx - 4.0, cy + 10.0);
+        ctx.stroke().ok();
+        // Arrow pointing out
+        ctx.move_to(cx - 2.0, cy);
+        ctx.line_to(cx + 10.0, cy);
+        ctx.stroke().ok();
+        // Arrow head
+        ctx.move_to(cx + 6.0, cy - 4.0);
+        ctx.line_to(cx + 10.0, cy);
+        ctx.line_to(cx + 6.0, cy + 4.0);
+        ctx.stroke().ok();
+    }
+
+    /// Draw hibernate icon (crescent moon)
+    fn draw_hibernate_icon(&self, ctx: &CairoContext, cx: f64, cy: f64) {
+        let pi = std::f64::consts::PI;
+        // Crescent moon using two arcs
+        ctx.arc(cx, cy, 9.0, pi * 0.3, pi * 1.7);
+        ctx.arc_negative(cx + 5.0, cy, 7.0, pi * 1.5, pi * 0.5);
+        ctx.close_path();
+        ctx.fill().ok();
     }
 
     /// Draw the volume slider
@@ -528,17 +699,10 @@ impl PopupPanel {
         ctx.set_source_rgba(0.18, 0.18, 0.2, 1.0);
         ctx.fill().ok();
 
-        // Icon (clickable for mute)
-        ctx.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
-        let icon = if is_muted { "🔇" } else { "🔊" };
-        if is_muted {
-            ctx.set_source_rgba(0.5, 0.5, 0.55, 1.0);
-        } else {
-            ctx.set_source_rgba(0.9, 0.9, 0.95, 1.0);
-        }
-        ctx.set_font_size(18.0);
-        ctx.move_to(x + 14.0, y + height / 2.0 + 6.0);
-        ctx.show_text(icon).ok();
+        // Draw speaker icon with Cairo
+        let icon_cx = x + 30.0;
+        let icon_cy = y + height / 2.0;
+        self.draw_speaker_icon(ctx, icon_cx, icon_cy, is_muted, value);
 
         // Slider track
         let track_y = y + height / 2.0 - 4.0;
@@ -557,21 +721,72 @@ impl PopupPanel {
         }
         ctx.fill().ok();
 
-        // Slider knob
+        // Slider knob - position it so it doesn't overlap with percentage
         let knob_x = slider_x + fill_width - 8.0;
         let knob_y = y + height / 2.0;
         ctx.arc(knob_x.max(slider_x), knob_y, 10.0, 0.0, 2.0 * std::f64::consts::PI);
         ctx.set_source_rgba(1.0, 1.0, 1.0, 0.95);
         ctx.fill().ok();
 
-        // Percentage text
+        // Percentage text - moved to fixed position outside slider area
         ctx.set_source_rgba(0.7, 0.7, 0.75, 1.0);
-        ctx.set_font_size(11.0);
+        ctx.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+        ctx.set_font_size(10.0);
         let pct_text = format!("{:.0}%", value * 100.0);
-        ctx.move_to(x + width - 35.0, y + height / 2.0 + 4.0);
+        // Position text at far right, with enough room for "100%"
+        ctx.move_to(x + width - 32.0, y + height / 2.0 + 4.0);
         ctx.show_text(&pct_text).ok();
 
         Ok(())
+    }
+
+    /// Draw speaker icon with sound waves
+    fn draw_speaker_icon(&self, ctx: &CairoContext, cx: f64, cy: f64, muted: bool, volume: f64) {
+        ctx.set_line_width(2.0);
+        ctx.set_line_cap(cairo::LineCap::Round);
+
+        if muted {
+            ctx.set_source_rgba(0.5, 0.5, 0.55, 1.0);
+        } else {
+            ctx.set_source_rgba(0.9, 0.9, 0.95, 1.0);
+        }
+
+        // Speaker body (trapezoid + rectangle)
+        ctx.move_to(cx - 8.0, cy - 4.0);
+        ctx.line_to(cx - 4.0, cy - 4.0);
+        ctx.line_to(cx, cy - 8.0);
+        ctx.line_to(cx, cy + 8.0);
+        ctx.line_to(cx - 4.0, cy + 4.0);
+        ctx.line_to(cx - 8.0, cy + 4.0);
+        ctx.close_path();
+        ctx.fill().ok();
+
+        if muted {
+            // Draw X for mute
+            ctx.set_source_rgba(0.9, 0.3, 0.3, 1.0);
+            ctx.move_to(cx + 4.0, cy - 5.0);
+            ctx.line_to(cx + 12.0, cy + 5.0);
+            ctx.move_to(cx + 12.0, cy - 5.0);
+            ctx.line_to(cx + 4.0, cy + 5.0);
+            ctx.stroke().ok();
+        } else {
+            // Sound waves based on volume level
+            let pi = std::f64::consts::PI;
+            ctx.set_source_rgba(0.9, 0.9, 0.95, 1.0);
+
+            if volume > 0.0 {
+                ctx.arc(cx + 4.0, cy, 4.0, -pi * 0.4, pi * 0.4);
+                ctx.stroke().ok();
+            }
+            if volume > 0.33 {
+                ctx.arc(cx + 4.0, cy, 8.0, -pi * 0.4, pi * 0.4);
+                ctx.stroke().ok();
+            }
+            if volume > 0.66 {
+                ctx.arc(cx + 4.0, cy, 12.0, -pi * 0.4, pi * 0.4);
+                ctx.stroke().ok();
+            }
+        }
     }
 
     /// Draw a rounded rectangle path
