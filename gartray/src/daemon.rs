@@ -5,11 +5,14 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex};
 use tokio::signal::unix::{signal, SignalKind};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::{self, Config};
 use crate::ipc::{Command, IpcServer};
+use crate::tray::sni::{watcher, StatusNotifierHost};
+use crate::tray::sni::watcher::WatcherState;
 use crate::tray::xembed::XEmbedManager;
 
 /// Get the path to the PID file
@@ -80,6 +83,12 @@ pub struct Daemon {
     xembed: Option<XEmbedManager>,
     ipc_server: IpcServer,
     ipc_rx: Receiver<Command>,
+    /// D-Bus connection for SNI
+    dbus_conn: Option<zbus::Connection>,
+    /// SNI watcher state
+    sni_watcher_state: Option<Arc<Mutex<WatcherState>>>,
+    /// SNI host
+    sni_host: Option<StatusNotifierHost>,
     running: bool,
     panel_visible: bool,
 }
@@ -93,6 +102,9 @@ impl Daemon {
             xembed: None,
             ipc_server,
             ipc_rx,
+            dbus_conn: None,
+            sni_watcher_state: None,
+            sni_host: None,
             running: true,
             panel_visible: false,
         })
@@ -102,6 +114,47 @@ impl Daemon {
     pub fn init_ipc(&mut self) -> Result<()> {
         self.ipc_server.start().context("Failed to start IPC server")?;
         info!("IPC server started");
+        Ok(())
+    }
+
+    /// Initialize D-Bus and SNI support
+    pub async fn init_dbus(&mut self) -> Result<()> {
+        info!("Initializing D-Bus connection...");
+
+        // Connect to session bus
+        let conn = zbus::Connection::session()
+            .await
+            .context("Failed to connect to session D-Bus")?;
+
+        info!("Connected to D-Bus session bus");
+
+        // Start the StatusNotifierWatcher service
+        match watcher::start_watcher(&conn).await {
+            Ok(state) => {
+                self.sni_watcher_state = Some(state.clone());
+                info!("StatusNotifierWatcher service started");
+
+                // Create and register the host
+                let mut host = StatusNotifierHost::new(conn.clone(), state)
+                    .await
+                    .context("Failed to create SNI host")?;
+
+                host.register().await?;
+
+                // Query existing items
+                if let Err(e) = host.query_existing_items().await {
+                    warn!("Failed to query existing SNI items: {}", e);
+                }
+
+                self.sni_host = Some(host);
+            }
+            Err(e) => {
+                // Another watcher might be running (e.g., KDE's)
+                warn!("Failed to start StatusNotifierWatcher: {} (another tray may be running)", e);
+            }
+        }
+
+        self.dbus_conn = Some(conn);
         Ok(())
     }
 
@@ -186,9 +239,12 @@ impl Daemon {
                 let _ = self.handle_reload();
             }
             Command::Status => {
+                let xembed_count = self.xembed.as_ref().map(|x| x.icon_count()).unwrap_or(0);
+                let sni_count = self.sni_host.as_ref().map(|h| h.item_count()).unwrap_or(0);
                 info!(
-                    "Status: running, {} icons, panel {}",
-                    self.xembed.as_ref().map(|x| x.icon_count()).unwrap_or(0),
+                    "Status: running, {} XEMBED icons, {} SNI items, panel {}",
+                    xembed_count,
+                    sni_count,
                     if self.panel_visible { "visible" } else { "hidden" }
                 );
             }
@@ -238,6 +294,7 @@ pub async fn run(config_path: Option<String>, _foreground: bool) -> Result<()> {
 
     let mut daemon = Daemon::new(config)?;
     daemon.init_ipc().context("Failed to initialize IPC")?;
+    daemon.init_dbus().await.context("Failed to initialize D-Bus")?;
     daemon.init_x11().context("Failed to initialize X11")?;
     daemon.run().await
 }
