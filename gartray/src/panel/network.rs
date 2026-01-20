@@ -528,6 +528,206 @@ impl NetworkModule {
         }
     }
 
+    /// Connect to a WiFi network
+    /// If password is None and network is secured, this will try to use saved credentials
+    pub fn connect_to_network(&mut self, ssid: &str) -> Result<()> {
+        let conn = match &self.conn {
+            Some(c) => c,
+            None => anyhow::bail!("No D-Bus connection"),
+        };
+
+        if !self.state.wifi_available || !self.state.wifi_enabled {
+            anyhow::bail!("WiFi not available or not enabled");
+        }
+
+        info!("Connecting to WiFi network: {}", ssid);
+
+        // Get the WiFi device
+        let wifi_device = match self.get_wifi_device(conn) {
+            Some(d) => d,
+            None => anyhow::bail!("No WiFi device found"),
+        };
+
+        // Find the access point path for this SSID
+        let ap_path = self.state.access_points.iter()
+            .find(|ap| ap.ssid == ssid)
+            .map(|ap| ap.path.clone())
+            .ok_or_else(|| anyhow::anyhow!("Access point not found: {}", ssid))?;
+
+        // Try to find existing connection settings for this SSID
+        if let Some(connection_path) = self.find_connection_for_ssid(conn, ssid) {
+            info!("Found existing connection profile, activating: {}", connection_path);
+            return self.activate_connection(conn, &connection_path, &wifi_device, &ap_path);
+        }
+
+        // No existing connection - try to connect (NM will create one for open networks)
+        // For secured networks without saved credentials, this will fail
+        info!("No saved connection, attempting AddAndActivateConnection");
+        self.add_and_activate_connection(conn, ssid, &wifi_device, &ap_path)
+    }
+
+    /// Disconnect from current WiFi network
+    pub fn disconnect(&mut self) -> Result<()> {
+        let conn = match &self.conn {
+            Some(c) => c,
+            None => anyhow::bail!("No D-Bus connection"),
+        };
+
+        let wifi_device = match self.get_wifi_device(conn) {
+            Some(d) => d,
+            None => anyhow::bail!("No WiFi device found"),
+        };
+
+        info!("Disconnecting WiFi device");
+        conn.call_method(
+            Some("org.freedesktop.NetworkManager"),
+            wifi_device.as_str(),
+            Some("org.freedesktop.NetworkManager.Device"),
+            "Disconnect",
+            &(),
+        )?;
+
+        self.state.connected_ssid = None;
+        Ok(())
+    }
+
+    /// Find existing connection settings for an SSID
+    fn find_connection_for_ssid(&self, conn: &Connection, ssid: &str) -> Option<String> {
+        // Get all connection settings from Settings service
+        let reply: zbus::Message = conn.call_method(
+            Some("org.freedesktop.NetworkManager"),
+            "/org/freedesktop/NetworkManager/Settings",
+            Some("org.freedesktop.NetworkManager.Settings"),
+            "ListConnections",
+            &(),
+        ).ok()?;
+
+        let body = reply.body();
+        let connections: Vec<zbus::zvariant::OwnedObjectPath> = body.deserialize().ok()?;
+
+        for conn_path in connections {
+            let path_str = conn_path.to_string();
+            if let Some(conn_ssid) = self.get_connection_ssid(conn, &path_str) {
+                if conn_ssid == ssid {
+                    return Some(path_str);
+                }
+            }
+        }
+        None
+    }
+
+    /// Get SSID from a connection settings object
+    fn get_connection_ssid(&self, conn: &Connection, conn_path: &str) -> Option<String> {
+        // GetSettings returns a{sa{sv}} - dict of setting names to dict of properties
+        let reply: zbus::Message = conn.call_method(
+            Some("org.freedesktop.NetworkManager"),
+            conn_path,
+            Some("org.freedesktop.NetworkManager.Settings.Connection"),
+            "GetSettings",
+            &(),
+        ).ok()?;
+
+        let body = reply.body();
+        let settings: std::collections::HashMap<String, std::collections::HashMap<String, Value>> =
+            body.deserialize().ok()?;
+
+        // Check connection type is 802-11-wireless
+        if let Some(connection) = settings.get("connection") {
+            if let Some(Value::Str(conn_type)) = connection.get("type") {
+                if conn_type.as_str() != "802-11-wireless" {
+                    return None;
+                }
+            }
+        }
+
+        // Get SSID from 802-11-wireless settings
+        let wifi_settings = settings.get("802-11-wireless")?;
+        let ssid_value = wifi_settings.get("ssid")?;
+
+        // SSID is stored as ay (array of bytes)
+        match ssid_value {
+            Value::Array(arr) => {
+                let bytes: Vec<u8> = arr.iter()
+                    .filter_map(|v| {
+                        if let Value::U8(b) = v { Some(*b) } else { None }
+                    })
+                    .collect();
+                if !bytes.is_empty() {
+                    Some(String::from_utf8_lossy(&bytes).to_string())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Activate an existing connection
+    fn activate_connection(
+        &self,
+        conn: &Connection,
+        connection_path: &str,
+        device_path: &str,
+        ap_path: &str,
+    ) -> Result<()> {
+        use zbus::zvariant::ObjectPath;
+        conn.call_method(
+            Some("org.freedesktop.NetworkManager"),
+            "/org/freedesktop/NetworkManager",
+            Some("org.freedesktop.NetworkManager"),
+            "ActivateConnection",
+            &(
+                ObjectPath::from_str_unchecked(connection_path),
+                ObjectPath::from_str_unchecked(device_path),
+                ObjectPath::from_str_unchecked(ap_path),
+            ),
+        )?;
+        info!("Connection activation requested");
+        Ok(())
+    }
+
+    /// Add and activate a new connection (for open networks or when NM has secrets)
+    fn add_and_activate_connection(
+        &self,
+        conn: &Connection,
+        ssid: &str,
+        device_path: &str,
+        ap_path: &str,
+    ) -> Result<()> {
+        use std::collections::HashMap;
+        use zbus::zvariant::ObjectPath;
+
+        // Build minimal connection settings
+        let mut connection: HashMap<&str, Value> = HashMap::new();
+        connection.insert("type", Value::Str("802-11-wireless".into()));
+        connection.insert("id", Value::Str(ssid.into()));
+
+        let mut wireless: HashMap<&str, Value> = HashMap::new();
+        // SSID as byte array
+        let ssid_bytes: Vec<Value> = ssid.bytes().map(Value::U8).collect();
+        wireless.insert("ssid", Value::Array(ssid_bytes.into()));
+        wireless.insert("mode", Value::Str("infrastructure".into()));
+
+        let mut settings: HashMap<&str, HashMap<&str, Value>> = HashMap::new();
+        settings.insert("connection", connection);
+        settings.insert("802-11-wireless", wireless);
+
+        conn.call_method(
+            Some("org.freedesktop.NetworkManager"),
+            "/org/freedesktop/NetworkManager",
+            Some("org.freedesktop.NetworkManager"),
+            "AddAndActivateConnection",
+            &(
+                settings,
+                ObjectPath::from_str_unchecked(device_path),
+                ObjectPath::from_str_unchecked(ap_path),
+            ),
+        )?;
+
+        info!("AddAndActivateConnection requested for: {}", ssid);
+        Ok(())
+    }
+
     /// Get active connection SSID for a device
     fn get_active_ssid(&self, conn: &Connection, device_path: &str) -> Option<String> {
         // Get ActiveAccessPoint from the wireless device
