@@ -18,6 +18,9 @@ gartk-render = { path = "../gartk/gartk-render" }
 # X11
 x11rb = { version = "0.13", features = ["allow-unsafe-code", "randr"] }
 
+# Cairo rendering
+cairo-rs = { version = "0.20", features = ["png"] }
+
 # D-Bus
 zbus = "4"
 

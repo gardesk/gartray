@@ -11,6 +11,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::{self, Config};
 use crate::ipc::{Command, IpcServer};
+use crate::tray::renderer::TrayRenderer;
 use crate::tray::sni::{watcher, StatusNotifierHost};
 use crate::tray::sni::watcher::WatcherState;
 use crate::tray::xembed::XEmbedManager;
@@ -89,6 +90,8 @@ pub struct Daemon {
     sni_watcher_state: Option<Arc<Mutex<WatcherState>>>,
     /// SNI host
     sni_host: Option<StatusNotifierHost>,
+    /// Tray renderer for SNI icons
+    tray_renderer: TrayRenderer,
     running: bool,
     panel_visible: bool,
 }
@@ -97,6 +100,7 @@ impl Daemon {
     /// Create a new daemon
     pub fn new(config: Config) -> Result<Self> {
         let (ipc_server, ipc_rx) = IpcServer::new();
+        let tray_renderer = TrayRenderer::new(&config.tray);
         Ok(Self {
             config,
             xembed: None,
@@ -105,6 +109,7 @@ impl Daemon {
             dbus_conn: None,
             sni_watcher_state: None,
             sni_host: None,
+            tray_renderer,
             running: true,
             panel_visible: false,
         })
@@ -255,10 +260,28 @@ impl Daemon {
         }
     }
 
-    /// Poll X11 events
+    /// Poll X11 events and render tray
     async fn poll_x11_events(&mut self) -> Result<()> {
         if let Some(ref mut xembed) = self.xembed {
             xembed.process_events()?;
+
+            // Render SNI icons if we have any
+            if let Some(ref sni_host) = self.sni_host {
+                let sni_items: Vec<_> = sni_host.items().collect();
+                if !sni_items.is_empty() {
+                    // Get XEMBED icon count for offset
+                    let xembed_offset = xembed.icon_count() as i32
+                        * (self.config.tray.icon_size as i32 + self.config.tray.spacing as i32);
+
+                    if let Err(e) = self.tray_renderer.render_sni_icons(
+                        xembed.tray_window(),
+                        &sni_items,
+                        xembed_offset,
+                    ) {
+                        warn!("Failed to render SNI icons: {}", e);
+                    }
+                }
+            }
         }
 
         // Small delay to prevent busy loop

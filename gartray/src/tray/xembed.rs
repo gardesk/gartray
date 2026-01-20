@@ -427,6 +427,11 @@ impl XEmbedManager {
         self.icons.len()
     }
 
+    /// Get the tray window for rendering
+    pub fn tray_window(&self) -> &Window {
+        &self.tray_window
+    }
+
     /// Check if we're the selection owner
     pub fn is_owner(&self) -> bool {
         self.is_owner

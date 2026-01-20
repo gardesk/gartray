@@ -18,6 +18,9 @@ gartk-render = { workspace = true }
 # X11
 x11rb = { workspace = true }
 
+# Cairo rendering
+cairo-rs = { workspace = true }
+
 # D-Bus
 zbus = { workspace = true }
 
