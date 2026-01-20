@@ -1,0 +1,21 @@
+[package]
+name = "gartrayctl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Control CLI for gartray daemon"
+
+[[bin]]
+name = "gartrayctl"
+path = "src/main.rs"
+
+[dependencies]
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# CLI
+clap = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }
