@@ -9,11 +9,23 @@ use x11rb::protocol::xproto::{
     self, Atom, AtomEnum, ClientMessageEvent, ConfigureWindowAux,
     ConnectionExt, CreateWindowAux, EventMask, PropMode, WindowClass,
 };
+use x11rb::protocol::randr::ConnectionExt as RandrConnectionExt;
 use x11rb::protocol::Event;
 use x11rb::wrapper::ConnectionExt as WrapperConnectionExt;
 use tracing::{debug, info, warn};
 
 use crate::config::TrayConfig;
+
+/// Monitor geometry info
+#[derive(Debug, Clone)]
+struct MonitorInfo {
+    name: String,
+    x: i16,
+    y: i16,
+    width: u16,
+    height: u16,
+    primary: bool,
+}
 
 /// Parse a hex color string like "#1a1a1a" to 0xAARRGGBB format
 fn parse_color(s: &str) -> Option<u32> {
@@ -43,6 +55,7 @@ struct TrayAtoms {
     net_system_tray_s: Atom,
     net_system_tray_opcode: Atom,
     net_system_tray_orientation: Atom,
+    net_system_tray_visual: Atom,
     manager: Atom,
     xembed: Atom,
 }
@@ -56,6 +69,7 @@ impl TrayAtoms {
             net_system_tray_s: conn.intern_atom(&selection_name, false)?,
             net_system_tray_opcode: conn.intern_atom("_NET_SYSTEM_TRAY_OPCODE", false)?,
             net_system_tray_orientation: conn.intern_atom("_NET_SYSTEM_TRAY_ORIENTATION", false)?,
+            net_system_tray_visual: conn.intern_atom("_NET_SYSTEM_TRAY_VISUAL", false)?,
             manager: conn.intern_atom("MANAGER", false)?,
             xembed: conn.intern_atom("_XEMBED", false)?,
         })
@@ -88,6 +102,81 @@ pub struct XEmbedManager {
 }
 
 impl XEmbedManager {
+    /// Query available monitors via RandR
+    fn get_monitors(conn: &Connection) -> Vec<MonitorInfo> {
+        let mut monitors = Vec::new();
+
+        // Get screen resources
+        let screen = conn.screen();
+        let root = screen.root;
+
+        if let Ok(cookie) = conn.inner().randr_get_screen_resources(root) {
+            if let Ok(resources) = cookie.reply() {
+                // Get primary output
+                let primary = conn.inner().randr_get_output_primary(root)
+                    .ok()
+                    .and_then(|c| c.reply().ok())
+                    .map(|r| r.output);
+
+                for output in &resources.outputs {
+                    if let Ok(info_cookie) = conn.inner().randr_get_output_info(*output, resources.config_timestamp) {
+                        if let Ok(info) = info_cookie.reply() {
+                            // Skip disconnected outputs
+                            if info.connection != x11rb::protocol::randr::Connection::CONNECTED {
+                                continue;
+                            }
+
+                            // Get the CRTC info for position/size
+                            if info.crtc != 0 {
+                                if let Ok(crtc_cookie) = conn.inner().randr_get_crtc_info(info.crtc, resources.config_timestamp) {
+                                    if let Ok(crtc) = crtc_cookie.reply() {
+                                        let name = String::from_utf8_lossy(&info.name).to_string();
+                                        monitors.push(MonitorInfo {
+                                            name,
+                                            x: crtc.x,
+                                            y: crtc.y,
+                                            width: crtc.width,
+                                            height: crtc.height,
+                                            primary: primary == Some(*output),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        debug!("Found {} monitors: {:?}", monitors.len(), monitors.iter().map(|m| &m.name).collect::<Vec<_>>());
+        monitors
+    }
+
+    /// Select which monitor to use based on config
+    fn select_monitor(monitors: &[MonitorInfo], selector: &str) -> Option<MonitorInfo> {
+        match selector {
+            "primary" => {
+                // Find primary, or fall back to first monitor
+                monitors.iter().find(|m| m.primary).cloned()
+                    .or_else(|| monitors.first().cloned())
+            }
+            "all" => {
+                // For "all", just use primary for now (multi-tray needs bigger changes)
+                monitors.iter().find(|m| m.primary).cloned()
+                    .or_else(|| monitors.first().cloned())
+            }
+            name => {
+                // Find monitor by name
+                monitors.iter().find(|m| m.name == name).cloned()
+                    .or_else(|| {
+                        warn!("Monitor '{}' not found, using primary", name);
+                        monitors.iter().find(|m| m.primary).cloned()
+                            .or_else(|| monitors.first().cloned())
+                    })
+            }
+        }
+    }
+
     /// Create a new XEMBED manager
     pub fn new(config: &TrayConfig) -> Result<Self> {
         let conn = Connection::connect(None).context("Failed to connect to X11")?;
@@ -114,26 +203,39 @@ impl XEmbedManager {
         // Parse background color from config
         let bg_color = parse_color(&config.background).unwrap_or(0xFF1a1a1a);
 
-        // Get screen dimensions for positioning
-        let screen = conn.screen();
-        let screen_width = screen.width_in_pixels as i16;
-        let screen_height = screen.height_in_pixels as i16;
+        // Get monitor info for positioning
+        let monitors = Self::get_monitors(&conn);
+        let target_monitor = Self::select_monitor(&monitors, &config.monitor);
+
+        // Use monitor dimensions for positioning, or fall back to screen
+        let (mon_x, mon_y, mon_width, mon_height) = if let Some(ref mon) = target_monitor {
+            info!("Using monitor '{}' at {}x{}+{}+{}", mon.name, mon.width, mon.height, mon.x, mon.y);
+            (mon.x, mon.y, mon.width, mon.height)
+        } else {
+            let screen = conn.screen();
+            warn!("No monitor found, using full screen");
+            (0i16, 0i16, screen.width_in_pixels, screen.height_in_pixels)
+        };
+
         let tray_width = 200u32;
         let tray_height = config.icon_size;
 
-        // Calculate position based on config
+        // Calculate position relative to target monitor
+        let offset_x = config.offset_x as i16;
+        let offset_y = config.offset_y as i16;
         let (x, y) = match config.position.as_str() {
-            "top-left" => (8i16, 8i16),
-            "top-right" => (screen_width - tray_width as i16 - 8, 8),
-            "bottom-left" => (8, screen_height - tray_height as i16 - 8),
-            "bottom-right" => (screen_width - tray_width as i16 - 8, screen_height - tray_height as i16 - 8),
-            _ => (screen_width - tray_width as i16 - 8, 8), // default top-right
+            "top-left" => (mon_x + offset_x, mon_y + offset_y),
+            "top-right" => (mon_x + mon_width as i16 - tray_width as i16 - offset_x, mon_y + offset_y),
+            "bottom-left" => (mon_x + offset_x, mon_y + mon_height as i16 - tray_height as i16 - offset_y),
+            "bottom-right" => (mon_x + mon_width as i16 - tray_width as i16 - offset_x, mon_y + mon_height as i16 - tray_height as i16 - offset_y),
+            _ => (mon_x + mon_width as i16 - tray_width as i16 - offset_x, mon_y + offset_y), // default top-right
         };
 
         debug!("Tray position: {}x{} at ({}, {})", tray_width, tray_height, x, y);
 
         // Create visible tray container window using gartk
         // Use override_redirect to prevent WM from managing this window
+        // Use transparent mode for proper alpha compositing with tray icons
         let tray_window = Window::create(
             conn.clone(),
             WindowConfig::new()
@@ -143,6 +245,7 @@ impl XEmbedManager {
                 .position(x as i32, y as i32)
                 .background(bg_color)
                 .override_redirect(true)
+                .transparent(true)
                 .map_on_create(true),
         )?;
 
@@ -191,6 +294,18 @@ impl XEmbedManager {
             self.atoms.net_system_tray_orientation,
             AtomEnum::CARDINAL,
             &[0],
+        );
+
+        // Set tray visual to the tray window's visual (ARGB if available)
+        // This tells clients what visual to use for their icons
+        let visual_id = self.tray_window.visual();
+        info!("Advertising tray visual: {}", visual_id);
+        let _ = inner.change_property32(
+            PropMode::REPLACE,
+            self.selection_window,
+            self.atoms.net_system_tray_visual,
+            AtomEnum::VISUALID,
+            &[visual_id],
         );
 
         // Broadcast MANAGER message to root

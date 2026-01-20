@@ -37,6 +37,12 @@ pub struct TrayConfig {
     pub background: String,
     /// Window opacity
     pub opacity: f64,
+    /// X offset from edge (positive = inward)
+    pub offset_x: i32,
+    /// Y offset from edge (positive = inward)
+    pub offset_y: i32,
+    /// Monitor to show on: "primary", "all", or monitor name (e.g., "HDMI-0")
+    pub monitor: String,
 }
 
 impl Default for TrayConfig {
@@ -47,6 +53,9 @@ impl Default for TrayConfig {
             spacing: 8.0,
             background: "#1a1a1a".to_string(),
             opacity: 0.95,
+            offset_x: 8,
+            offset_y: 8,
+            monitor: "primary".to_string(),
         }
     }
 }
