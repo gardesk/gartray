@@ -15,6 +15,9 @@ use crate::panel::volume::VolumeModule;
 use crate::panel::brightness::BrightnessModule;
 use crate::panel::battery::BatteryModule;
 use crate::panel::power::PowerModule;
+use crate::panel::network::NetworkModule;
+use crate::panel::bluetooth::BluetoothModule;
+use crate::panel::dnd::DndModule;
 
 /// Monitor information
 #[derive(Debug, Clone)]
@@ -71,6 +74,12 @@ pub struct PopupPanel {
     battery: Option<BatteryModule>,
     /// Power actions module
     power: Option<PowerModule>,
+    /// Network (WiFi) module
+    network: Option<NetworkModule>,
+    /// Bluetooth module
+    bluetooth: Option<BluetoothModule>,
+    /// Do Not Disturb module
+    dnd: Option<DndModule>,
     /// Slider rows for hit testing (volume, brightness)
     slider_rows: Vec<SliderRow>,
     /// Toggle buttons for hit testing
@@ -137,6 +146,44 @@ impl PopupPanel {
             }
         };
 
+        // Initialize network (WiFi) module
+        let network = {
+            let mut n = NetworkModule::new();
+            if let Err(e) = n.connect() {
+                warn!("Failed to connect network module: {}", e);
+                None
+            } else {
+                info!("Network module initialized, WiFi: {}",
+                      if n.is_wifi_enabled() { "on" } else { "off" });
+                Some(n)
+            }
+        };
+
+        // Initialize Bluetooth module
+        let bluetooth = {
+            let mut b = BluetoothModule::new();
+            if let Err(e) = b.connect() {
+                warn!("Failed to connect bluetooth module: {}", e);
+                None
+            } else {
+                info!("Bluetooth module initialized, powered: {}",
+                      if b.is_powered() { "on" } else { "off" });
+                Some(b)
+            }
+        };
+
+        // Initialize DND module
+        let dnd = {
+            let mut d = DndModule::new();
+            if let Err(e) = d.init() {
+                warn!("Failed to init DND module: {}", e);
+                None
+            } else {
+                info!("DND module initialized");
+                Some(d)
+            }
+        };
+
         Ok(Self {
             conn,
             window: None,
@@ -152,6 +199,9 @@ impl PopupPanel {
             brightness,
             battery,
             power,
+            network,
+            bluetooth,
+            dnd,
             slider_rows: Vec::new(),
             toggle_buttons: Vec::new(),
             dragging: None,
@@ -412,15 +462,20 @@ impl PopupPanel {
             let btn_height = 60.0;
             let btn_spacing = 8.0;
 
+            // Get current states from modules
+            let wifi_active = self.network.as_ref().map(|n| n.is_wifi_enabled()).unwrap_or(false);
+            let bt_active = self.bluetooth.as_ref().map(|b| b.is_powered()).unwrap_or(false);
+            let dnd_active = self.dnd.as_ref().map(|d| d.is_enabled()).unwrap_or(false);
+
             // Row 1: WiFi, Bluetooth
-            self.draw_toggle_button(&ctx, "WiFi", "wifi", false, 16.0, grid_y, btn_width, btn_height)?;
+            self.draw_toggle_button(&ctx, "WiFi", "wifi", wifi_active, 16.0, grid_y, btn_width, btn_height)?;
             self.toggle_buttons.push(ToggleButton {
-                name: "wifi".to_string(), x: 16.0, y: grid_y, width: btn_width, height: btn_height, active: false,
+                name: "wifi".to_string(), x: 16.0, y: grid_y, width: btn_width, height: btn_height, active: wifi_active,
             });
 
-            self.draw_toggle_button(&ctx, "Bluetooth", "bluetooth", false, 16.0 + btn_width + btn_spacing, grid_y, btn_width, btn_height)?;
+            self.draw_toggle_button(&ctx, "Bluetooth", "bluetooth", bt_active, 16.0 + btn_width + btn_spacing, grid_y, btn_width, btn_height)?;
             self.toggle_buttons.push(ToggleButton {
-                name: "bluetooth".to_string(), x: 16.0 + btn_width + btn_spacing, y: grid_y, width: btn_width, height: btn_height, active: false,
+                name: "bluetooth".to_string(), x: 16.0 + btn_width + btn_spacing, y: grid_y, width: btn_width, height: btn_height, active: bt_active,
             });
 
             // Row 2: Battery (status), Do Not Disturb
@@ -436,9 +491,9 @@ impl PopupPanel {
                 name: "battery".to_string(), x: 16.0, y: row2_y, width: btn_width, height: btn_height, active: false,
             });
 
-            self.draw_toggle_button(&ctx, "DND", "dnd", false, 16.0 + btn_width + btn_spacing, row2_y, btn_width, btn_height)?;
+            self.draw_toggle_button(&ctx, "DND", "dnd", dnd_active, 16.0 + btn_width + btn_spacing, row2_y, btn_width, btn_height)?;
             self.toggle_buttons.push(ToggleButton {
-                name: "dnd".to_string(), x: 16.0 + btn_width + btn_spacing, y: row2_y, width: btn_width, height: btn_height, active: false,
+                name: "dnd".to_string(), x: 16.0 + btn_width + btn_spacing, y: row2_y, width: btn_width, height: btn_height, active: dnd_active,
             });
 
             // === Power Button Row (4 smaller buttons) ===
@@ -995,17 +1050,33 @@ impl PopupPanel {
                     }
                 }
             }
-            // TODO: NetworkManager D-Bus for WiFi
+            // WiFi via NetworkManager D-Bus
             "wifi" => {
-                info!("WiFi toggle not yet implemented (needs NetworkManager D-Bus)");
+                if let Some(ref mut network) = self.network {
+                    if let Err(e) = network.toggle_wifi() {
+                        warn!("WiFi toggle failed: {}", e);
+                    }
+                } else {
+                    info!("WiFi not available");
+                }
             }
-            // TODO: BlueZ D-Bus for Bluetooth
+            // Bluetooth via BlueZ D-Bus
             "bluetooth" => {
-                info!("Bluetooth toggle not yet implemented (needs BlueZ D-Bus)");
+                if let Some(ref mut bt) = self.bluetooth {
+                    if let Err(e) = bt.toggle() {
+                        warn!("Bluetooth toggle failed: {}", e);
+                    }
+                } else {
+                    info!("Bluetooth not available");
+                }
             }
-            // TODO: Notification daemon for DND
+            // DND via dunstctl or local state
             "dnd" => {
-                info!("DND toggle not yet implemented");
+                if let Some(ref mut dnd) = self.dnd {
+                    if let Err(e) = dnd.toggle() {
+                        warn!("DND toggle failed: {}", e);
+                    }
+                }
             }
             // Battery is just a status display, not a toggle
             "battery" => {

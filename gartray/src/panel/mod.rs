@@ -7,12 +7,18 @@ pub mod volume;
 pub mod brightness;
 pub mod battery;
 pub mod power;
+pub mod network;
+pub mod bluetooth;
+pub mod dnd;
 
 pub use popup::PopupPanel;
 pub use volume::VolumeModule;
 pub use brightness::BrightnessModule;
 pub use battery::BatteryModule;
 pub use power::PowerModule;
+pub use network::NetworkModule;
+pub use bluetooth::BluetoothModule;
+pub use dnd::DndModule;
 
 /// Panel module trait
 pub trait PanelModule {
