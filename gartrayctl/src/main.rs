@@ -17,11 +17,25 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Show the quick settings panel
-    Show,
+    Show {
+        /// X position for panel
+        #[arg(default_value = "0")]
+        x: i32,
+        /// Y position for panel
+        #[arg(default_value = "0")]
+        y: i32,
+    },
     /// Hide the quick settings panel
     Hide,
     /// Toggle quick settings panel visibility
-    Toggle,
+    Toggle {
+        /// X position for panel
+        #[arg(default_value = "0")]
+        x: i32,
+        /// Y position for panel
+        #[arg(default_value = "0")]
+        y: i32,
+    },
     /// Reload configuration
     Reload,
     /// Get daemon status
@@ -33,14 +47,14 @@ enum Commands {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let command = match cli.command {
-        Commands::Show => "show",
-        Commands::Hide => "hide",
-        Commands::Toggle => "toggle",
-        Commands::Reload => "reload",
-        Commands::Status => "status",
-        Commands::Quit => "quit",
+    let cmd = match cli.command {
+        Commands::Show { x, y } => ipc::Command::Show { x, y },
+        Commands::Hide => ipc::Command::Hide,
+        Commands::Toggle { x, y } => ipc::Command::Toggle { x, y },
+        Commands::Reload => ipc::Command::Reload,
+        Commands::Status => ipc::Command::Status,
+        Commands::Quit => ipc::Command::Quit,
     };
 
-    ipc::send_command(command)
+    ipc::send_command(cmd)
 }

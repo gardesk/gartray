@@ -44,7 +44,7 @@ pub struct Response {
 }
 
 /// Send a command to the running daemon
-pub fn send_command(command: &str) -> Result<()> {
+pub fn send_command(cmd: Command) -> Result<()> {
     let path = socket_path();
 
     if !path.exists() {
@@ -53,17 +53,6 @@ pub fn send_command(command: &str) -> Result<()> {
 
     let mut stream = UnixStream::connect(&path)
         .with_context(|| "Failed to connect to gartray daemon")?;
-
-    // CLI commands use default position (0,0) which the daemon interprets as "use default position"
-    let cmd = match command {
-        "show" => Command::Show { x: 0, y: 0 },
-        "hide" => Command::Hide,
-        "toggle" => Command::Toggle { x: 0, y: 0 },
-        "reload" => Command::Reload,
-        "status" => Command::Status,
-        "quit" => Command::Quit,
-        _ => anyhow::bail!("Unknown command: {}", command),
-    };
 
     let cmd_json = serde_json::to_string(&cmd)?;
     writeln!(stream, "{}", cmd_json)?;
