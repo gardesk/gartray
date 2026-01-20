@@ -11,6 +11,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::{self, Config};
 use crate::ipc::{Command, IpcServer};
+use crate::panel::PopupPanel;
 use crate::tray::renderer::TrayRenderer;
 use crate::tray::sni::{watcher, StatusNotifierHost};
 use crate::tray::sni::watcher::WatcherState;
@@ -92,8 +93,9 @@ pub struct Daemon {
     sni_host: Option<StatusNotifierHost>,
     /// Tray renderer for SNI icons
     tray_renderer: TrayRenderer,
+    /// Quick settings popup panel
+    panel: Option<PopupPanel>,
     running: bool,
-    panel_visible: bool,
 }
 
 impl Daemon {
@@ -101,6 +103,23 @@ impl Daemon {
     pub fn new(config: Config) -> Result<Self> {
         let (ipc_server, ipc_rx) = IpcServer::new();
         let tray_renderer = TrayRenderer::new(&config.tray);
+
+        // Create popup panel if enabled
+        let panel = if config.panel.enabled {
+            match PopupPanel::new(&config.panel) {
+                Ok(p) => {
+                    info!("Created quick settings panel");
+                    Some(p)
+                }
+                Err(e) => {
+                    warn!("Failed to create panel: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             xembed: None,
@@ -110,8 +129,8 @@ impl Daemon {
             sni_watcher_state: None,
             sni_host: None,
             tray_renderer,
+            panel,
             running: true,
-            panel_visible: false,
         })
     }
 
@@ -226,18 +245,30 @@ impl Daemon {
         match cmd {
             Command::Show => {
                 info!("Showing panel");
-                self.panel_visible = true;
-                // TODO: Actually show the panel window
+                if let Some(ref mut panel) = self.panel {
+                    // Show near screen center for now
+                    // TODO: Get tray position or mouse position
+                    let _ = panel.show(800, 50);
+                    let _ = panel.render();
+                }
             }
             Command::Hide => {
                 info!("Hiding panel");
-                self.panel_visible = false;
-                // TODO: Actually hide the panel window
+                if let Some(ref mut panel) = self.panel {
+                    let _ = panel.hide();
+                }
             }
             Command::Toggle => {
-                self.panel_visible = !self.panel_visible;
-                info!("Panel visibility toggled: {}", self.panel_visible);
-                // TODO: Actually toggle the panel window
+                if let Some(ref mut panel) = self.panel {
+                    let visible = panel.is_visible();
+                    info!("Panel visibility toggled: {} -> {}", visible, !visible);
+                    if visible {
+                        let _ = panel.hide();
+                    } else {
+                        let _ = panel.show(800, 50);
+                        let _ = panel.render();
+                    }
+                }
             }
             Command::Reload => {
                 info!("Reloading config via IPC");
@@ -246,11 +277,12 @@ impl Daemon {
             Command::Status => {
                 let xembed_count = self.xembed.as_ref().map(|x| x.icon_count()).unwrap_or(0);
                 let sni_count = self.sni_host.as_ref().map(|h| h.item_count()).unwrap_or(0);
+                let panel_visible = self.panel.as_ref().map(|p| p.is_visible()).unwrap_or(false);
                 info!(
                     "Status: running, {} XEMBED icons, {} SNI items, panel {}",
                     xembed_count,
                     sni_count,
-                    if self.panel_visible { "visible" } else { "hidden" }
+                    if panel_visible { "visible" } else { "hidden" }
                 );
             }
             Command::Quit => {
