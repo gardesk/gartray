@@ -4,10 +4,11 @@
 
 pub mod xembed;
 pub mod sni;
+pub mod icons;
 
 // TODO: Sprint 3+
-// pub mod icons;
 // pub mod menu;
 
 pub use xembed::XEmbedManager;
 pub use sni::{StatusNotifierWatcher, StatusNotifierHost, SniItem};
+pub use icons::IconData;
