@@ -24,9 +24,9 @@ struct MonitorInfo {
     _height: u32,
 }
 
-/// Module row layout info
+/// Slider row layout info (for volume/brightness)
 #[derive(Debug, Clone)]
-struct ModuleRow {
+struct SliderRow {
     name: String,
     y: f64,
     height: f64,
@@ -35,6 +35,17 @@ struct ModuleRow {
     /// Icon hit region (for mute toggle)
     icon_x: f64,
     icon_width: f64,
+}
+
+/// Toggle button layout info
+#[derive(Debug, Clone)]
+struct ToggleButton {
+    name: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    active: bool,
 }
 
 /// Quick settings popup panel
@@ -57,8 +68,10 @@ pub struct PopupPanel {
     brightness: Option<BrightnessModule>,
     /// Battery status module
     battery: Option<BatteryModule>,
-    /// Module row layout for hit testing
-    module_rows: Vec<ModuleRow>,
+    /// Slider rows for hit testing (volume, brightness)
+    slider_rows: Vec<SliderRow>,
+    /// Toggle buttons for hit testing
+    toggle_buttons: Vec<ToggleButton>,
     /// Currently dragging a slider (module name)
     dragging: Option<String>,
     /// Pending value during drag (avoids blocking PulseAudio calls)
@@ -70,10 +83,9 @@ impl PopupPanel {
     pub fn new(config: &PanelConfig) -> Result<Self> {
         let conn = Connection::connect(None).context("Failed to connect to X11")?;
 
-        // Calculate height based on number of modules
-        let module_height = 50;
-        let header_height = 50;
-        let height = header_height + (config.modules.len() as u32 * module_height) + 20;
+        // Calculate height: header + toggle grid (2 rows) + volume slider
+        // Header: 50px, Toggle grid: 2x70=140px, Slider: 60px, Padding: 20px
+        let height = 270;
 
         // Initialize modules based on config
         let mut volume = None;
@@ -124,7 +136,8 @@ impl PopupPanel {
             volume,
             brightness,
             battery,
-            module_rows: Vec::new(),
+            slider_rows: Vec::new(),
+            toggle_buttons: Vec::new(),
             dragging: None,
             drag_value: 0.0,
         })
@@ -335,8 +348,9 @@ impl PopupPanel {
 
     /// Render the panel content
     pub fn render(&mut self) -> Result<()> {
-        // Clear module rows for hit testing
-        self.module_rows.clear();
+        // Clear hit test regions
+        self.slider_rows.clear();
+        self.toggle_buttons.clear();
 
         // Render to surface in a separate scope so context is dropped before copy_to_window
         {
@@ -376,68 +390,70 @@ impl PopupPanel {
             ctx.line_to(self.width as f64 - 16.0, 45.0);
             ctx.stroke().ok();
 
-            // Draw modules with real data
-            let modules = self.config.modules.clone();
-            let mut y = 58.0;
-            let row_height = 42.0;
-            let slider_x = 100.0;
-            let slider_width = self.width as f64 - 32.0 - slider_x + 16.0;
+            // === Toggle Button Grid ===
+            let grid_y = 55.0;
+            let btn_width = (self.width as f64 - 48.0) / 2.0;  // 2 columns with padding
+            let btn_height = 60.0;
+            let btn_spacing = 8.0;
 
-            // Check if we're dragging a specific module
-            let dragging_module = self.dragging.clone();
-            let drag_val = self.drag_value;
+            // Row 1: WiFi, Bluetooth
+            self.draw_toggle_button(&ctx, "WiFi", "📶", false, 16.0, grid_y, btn_width, btn_height)?;
+            self.toggle_buttons.push(ToggleButton {
+                name: "wifi".to_string(), x: 16.0, y: grid_y, width: btn_width, height: btn_height, active: false,
+            });
 
-            for module_name in &modules {
-                let (mut value, label, icon, is_muted) = match module_name.as_str() {
-                    "volume" => {
-                        if let Some(ref vol) = self.volume {
-                            let state = vol.state();
-                            let icon = if state.muted { "🔇" } else { "🔊" };
-                            (state.volume, "Volume", icon, state.muted)
-                        } else {
-                            (0.75, "Volume", "🔊", false)
-                        }
-                    }
-                    "brightness" => {
-                        if let Some(ref bright) = self.brightness {
-                            (bright.state().brightness, "Brightness", "☀", false)
-                        } else {
-                            (0.8, "Brightness", "☀", false)
-                        }
-                    }
-                    "battery" => {
-                        if let Some(ref bat) = self.battery {
-                            let state = bat.state();
-                            let icon = if state.charging { "🔌" } else { "🔋" };
-                            (state.percentage / 100.0, "Battery", icon, false)
-                        } else {
-                            (0.85, "Battery", "🔋", false)
-                        }
-                    }
-                    _ => (0.5, module_name.as_str(), "", false),
+            self.draw_toggle_button(&ctx, "Bluetooth", "🔵", false, 16.0 + btn_width + btn_spacing, grid_y, btn_width, btn_height)?;
+            self.toggle_buttons.push(ToggleButton {
+                name: "bluetooth".to_string(), x: 16.0 + btn_width + btn_spacing, y: grid_y, width: btn_width, height: btn_height, active: false,
+            });
+
+            // Row 2: Battery (status), Do Not Disturb
+            let row2_y = grid_y + btn_height + btn_spacing;
+            let battery_text = if let Some(ref bat) = self.battery {
+                let state = bat.state();
+                format!("{:.0}%", state.percentage)
+            } else {
+                "N/A".to_string()
+            };
+            self.draw_toggle_button(&ctx, &battery_text, "🔋", false, 16.0, row2_y, btn_width, btn_height)?;
+            self.toggle_buttons.push(ToggleButton {
+                name: "battery".to_string(), x: 16.0, y: row2_y, width: btn_width, height: btn_height, active: false,
+            });
+
+            self.draw_toggle_button(&ctx, "DND", "🔕", false, 16.0 + btn_width + btn_spacing, row2_y, btn_width, btn_height)?;
+            self.toggle_buttons.push(ToggleButton {
+                name: "dnd".to_string(), x: 16.0 + btn_width + btn_spacing, y: row2_y, width: btn_width, height: btn_height, active: false,
+            });
+
+            // === Volume Slider ===
+            let slider_y = row2_y + btn_height + 16.0;
+            let slider_x = 70.0;
+            let slider_width = self.width as f64 - slider_x - 24.0;
+            let slider_height = 42.0;
+
+            // Get volume value (use drag value if dragging)
+            let (volume_value, is_muted) = if let Some(ref vol) = self.volume {
+                let state = vol.state();
+                let v = if self.dragging.as_ref() == Some(&"volume".to_string()) {
+                    self.drag_value
+                } else {
+                    state.volume
                 };
+                (v, state.muted)
+            } else {
+                (0.5, false)
+            };
 
-                // Use drag value if we're dragging this module
-                if dragging_module.as_ref() == Some(module_name) {
-                    value = drag_val;
-                }
-
-                // Track row for hit testing (only for adjustable modules)
-                if module_name == "volume" || module_name == "brightness" {
-                    self.module_rows.push(ModuleRow {
-                        name: module_name.clone(),
-                        y,
-                        height: row_height,
-                        slider_x,
-                        slider_width,
-                        icon_x: 16.0 + 8.0,  // x offset + icon padding
-                        icon_width: 30.0,    // Click area for icon
-                    });
-                }
-
-                self.draw_module_row(&ctx, label, icon, value, is_muted, 16.0, y, slider_x, slider_width)?;
-                y += 50.0;
-            }
+            self.draw_volume_slider(&ctx, volume_value, is_muted, 16.0, slider_y, slider_x, slider_width, slider_height)?;
+            self.slider_rows.push(SliderRow {
+                name: "volume".to_string(),
+                y: slider_y,
+                height: slider_height,
+                slider_x,
+                slider_width,
+                icon_x: 16.0,
+                icon_width: 45.0,
+            });
 
             // ctx is dropped here, releasing the surface lock
         }
@@ -449,74 +465,111 @@ impl PopupPanel {
         Ok(())
     }
 
-    /// Draw a module row with slider
-    fn draw_module_row(
+    /// Draw a toggle button
+    fn draw_toggle_button(
         &self,
         ctx: &CairoContext,
         label: &str,
         icon: &str,
+        active: bool,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    ) -> Result<()> {
+        // Background
+        self.draw_rounded_rect(ctx, x, y, width, height, 8.0);
+        if active {
+            ctx.set_source_rgba(0.38, 0.68, 0.93, 0.3);  // Cyan tint when active
+        } else {
+            ctx.set_source_rgba(0.18, 0.18, 0.2, 1.0);
+        }
+        ctx.fill().ok();
+
+        // Border when active
+        if active {
+            self.draw_rounded_rect(ctx, x + 1.0, y + 1.0, width - 2.0, height - 2.0, 7.0);
+            ctx.set_source_rgba(0.38, 0.68, 0.93, 0.8);
+            ctx.set_line_width(2.0);
+            ctx.stroke().ok();
+        }
+
+        // Icon
+        ctx.set_source_rgba(1.0, 1.0, 1.0, if active { 1.0 } else { 0.7 });
+        ctx.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+        ctx.set_font_size(20.0);
+        ctx.move_to(x + width / 2.0 - 10.0, y + 28.0);
+        ctx.show_text(icon).ok();
+
+        // Label
+        ctx.set_font_size(11.0);
+        ctx.move_to(x + width / 2.0 - (label.len() as f64 * 3.0), y + height - 10.0);
+        ctx.show_text(label).ok();
+
+        Ok(())
+    }
+
+    /// Draw the volume slider
+    fn draw_volume_slider(
+        &self,
+        ctx: &CairoContext,
         value: f64,
         is_muted: bool,
         x: f64,
         y: f64,
         slider_x: f64,
         slider_width: f64,
+        height: f64,
     ) -> Result<()> {
         let width = self.width as f64 - 32.0;
-        let height = 42.0;
 
-        // Background with slight highlight
+        // Background
         self.draw_rounded_rect(ctx, x, y, width, height, 8.0);
         ctx.set_source_rgba(0.18, 0.18, 0.2, 1.0);
         ctx.fill().ok();
 
-        // Icon
+        // Icon (clickable for mute)
         ctx.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+        let icon = if is_muted { "🔇" } else { "🔊" };
         if is_muted {
-            ctx.set_source_rgba(0.5, 0.5, 0.55, 1.0); // Dim if muted
+            ctx.set_source_rgba(0.5, 0.5, 0.55, 1.0);
         } else {
-            ctx.set_source_rgba(0.7, 0.7, 0.75, 1.0);
+            ctx.set_source_rgba(0.9, 0.9, 0.95, 1.0);
         }
-        ctx.set_font_size(16.0);
-        ctx.move_to(x + 14.0, y + 27.0);
+        ctx.set_font_size(18.0);
+        ctx.move_to(x + 14.0, y + height / 2.0 + 6.0);
         ctx.show_text(icon).ok();
 
-        // Label
-        ctx.set_source_rgba(1.0, 1.0, 1.0, 0.9);
-        ctx.set_font_size(12.0);
-        ctx.move_to(x + 40.0, y + 26.0);
-        ctx.show_text(label).ok();
-
-        // Draw slider track
-        let track_y = y + height / 2.0 - 3.0;
-        let track_height = 6.0;
-        self.draw_rounded_rect(ctx, slider_x, track_y, slider_width, track_height, 3.0);
+        // Slider track
+        let track_y = y + height / 2.0 - 4.0;
+        let track_height = 8.0;
+        self.draw_rounded_rect(ctx, slider_x, track_y, slider_width, track_height, 4.0);
         ctx.set_source_rgba(0.25, 0.25, 0.28, 1.0);
         ctx.fill().ok();
 
-        // Draw slider fill (value portion)
-        let fill_width = (slider_width * value.clamp(0.0, 1.0)).max(6.0);
-        self.draw_rounded_rect(ctx, slider_x, track_y, fill_width, track_height, 3.0);
+        // Slider fill
+        let fill_width = (slider_width * value.clamp(0.0, 1.0)).max(8.0);
+        self.draw_rounded_rect(ctx, slider_x, track_y, fill_width, track_height, 4.0);
         if is_muted {
-            ctx.set_source_rgba(0.4, 0.4, 0.45, 1.0); // Gray if muted
+            ctx.set_source_rgba(0.4, 0.4, 0.45, 1.0);
         } else {
-            ctx.set_source_rgba(0.38, 0.68, 0.93, 1.0); // Cyan accent
+            ctx.set_source_rgba(0.38, 0.68, 0.93, 1.0);
         }
         ctx.fill().ok();
 
-        // Draw slider knob
-        let knob_x = slider_x + fill_width - 6.0;
+        // Slider knob
+        let knob_x = slider_x + fill_width - 8.0;
         let knob_y = y + height / 2.0;
-        ctx.arc(knob_x.max(slider_x), knob_y, 7.0, 0.0, 2.0 * std::f64::consts::PI);
+        ctx.arc(knob_x.max(slider_x), knob_y, 10.0, 0.0, 2.0 * std::f64::consts::PI);
         ctx.set_source_rgba(1.0, 1.0, 1.0, 0.95);
         ctx.fill().ok();
 
-        // Value text on right
+        // Percentage text
         ctx.set_source_rgba(0.7, 0.7, 0.75, 1.0);
         ctx.set_font_size(11.0);
-        let value_text = format!("{:.0}%", value * 100.0);
-        ctx.move_to(x + width - 40.0, y + 26.0);
-        ctx.show_text(&value_text).ok();
+        let pct_text = format!("{:.0}%", value * 100.0);
+        ctx.move_to(x + width - 35.0, y + height / 2.0 + 4.0);
+        ctx.show_text(&pct_text).ok();
 
         Ok(())
     }
@@ -632,13 +685,23 @@ impl PopupPanel {
         Ok(false)
     }
 
-    /// Handle button press - start drag or toggle mute
+    /// Handle button press - start drag, toggle mute, or click toggle buttons
     fn handle_button_press(&mut self, x: f64, y: f64) -> Result<()> {
         debug!("Panel button press at ({}, {})", x, y);
 
-        // Clone module_rows to avoid borrow issues
-        let rows = self.module_rows.clone();
+        // Check toggle buttons first
+        let buttons = self.toggle_buttons.clone();
+        for btn in &buttons {
+            if x >= btn.x && x < btn.x + btn.width && y >= btn.y && y < btn.y + btn.height {
+                info!("Toggle button '{}' clicked", btn.name);
+                // TODO: Implement actual toggle functionality for WiFi, Bluetooth, etc.
+                self.render()?;
+                return Ok(());
+            }
+        }
 
+        // Check slider rows
+        let rows = self.slider_rows.clone();
         for row in &rows {
             // Check if click is within this row's vertical bounds
             if y >= row.y && y < row.y + row.height {
@@ -673,7 +736,7 @@ impl PopupPanel {
     fn handle_drag(&mut self, x: f64, _y: f64) -> Result<()> {
         if let Some(ref module_name) = self.dragging.clone() {
             // Find the row for this module
-            if let Some(row) = self.module_rows.iter().find(|r| r.name == *module_name) {
+            if let Some(row) = self.slider_rows.iter().find(|r| r.name == *module_name) {
                 // Only update drag_value, don't call PulseAudio
                 self.drag_value = ((x - row.slider_x) / row.slider_width).clamp(0.0, 1.0);
                 self.render()?;
