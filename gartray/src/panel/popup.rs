@@ -97,9 +97,9 @@ impl PopupPanel {
     pub fn new(config: &PanelConfig) -> Result<Self> {
         let conn = Connection::connect(None).context("Failed to connect to X11")?;
 
-        // Calculate height: header + toggle grid (2 rows) + power buttons + volume slider
-        // Header: 50px, Toggle grid: 2x68=136px, Power row: 55px, Slider: 50px, Padding
-        let height = 320;
+        // Calculate height: header + toggle grid (2 rows) + power buttons + sliders
+        // Header: 50px, Toggle grid: 2x68=136px, Power row: 55px, Sliders: 2x50px, Padding
+        let height = 360;
 
         // Initialize modules based on config
         let mut volume = None;
@@ -576,6 +576,29 @@ impl PopupPanel {
                 icon_width: 45.0,
             });
 
+            // === Brightness Slider ===
+            let brightness_y = slider_y + slider_height + 8.0;
+            let brightness_value = if let Some(ref bright) = self.brightness {
+                if self.dragging.as_ref() == Some(&"brightness".to_string()) {
+                    self.drag_value
+                } else {
+                    bright.state().brightness
+                }
+            } else {
+                0.5
+            };
+
+            self.draw_brightness_slider(&ctx, brightness_value, 16.0, brightness_y, slider_x, slider_width, slider_height)?;
+            self.slider_rows.push(SliderRow {
+                name: "brightness".to_string(),
+                y: brightness_y,
+                height: slider_height,
+                slider_x,
+                slider_width,
+                icon_x: 16.0,
+                icon_width: 45.0,
+            });
+
             // ctx is dropped here, releasing the surface lock
         }
 
@@ -874,6 +897,83 @@ impl PopupPanel {
                 ctx.stroke().ok();
             }
         }
+    }
+
+    /// Draw the brightness slider
+    fn draw_brightness_slider(
+        &self,
+        ctx: &CairoContext,
+        value: f64,
+        x: f64,
+        y: f64,
+        slider_x: f64,
+        slider_width: f64,
+        height: f64,
+    ) -> Result<()> {
+        let width = self.width as f64 - 32.0;
+
+        // Background
+        self.draw_rounded_rect(ctx, x, y, width, height, 8.0);
+        ctx.set_source_rgba(0.18, 0.18, 0.2, 1.0);
+        ctx.fill().ok();
+
+        // Draw sun icon with Cairo
+        let icon_cx = x + 30.0;
+        let icon_cy = y + height / 2.0;
+        self.draw_sun_icon(ctx, icon_cx, icon_cy, value);
+
+        // Slider track
+        let track_y = y + height / 2.0 - 4.0;
+        let track_height = 8.0;
+        self.draw_rounded_rect(ctx, slider_x, track_y, slider_width, track_height, 4.0);
+        ctx.set_source_rgba(0.25, 0.25, 0.28, 1.0);
+        ctx.fill().ok();
+
+        // Slider fill
+        let fill_width = (slider_width * value.clamp(0.0, 1.0)).max(8.0);
+        self.draw_rounded_rect(ctx, slider_x, track_y, fill_width, track_height, 4.0);
+        ctx.set_source_rgba(0.95, 0.78, 0.28, 1.0);  // Warm yellow for brightness
+        ctx.fill().ok();
+
+        // Slider knob
+        let knob_x = slider_x + fill_width - 8.0;
+        let knob_y = y + height / 2.0;
+        ctx.arc(knob_x.max(slider_x), knob_y, 10.0, 0.0, 2.0 * std::f64::consts::PI);
+        ctx.set_source_rgba(1.0, 1.0, 1.0, 0.95);
+        ctx.fill().ok();
+
+        Ok(())
+    }
+
+    /// Draw sun icon for brightness
+    fn draw_sun_icon(&self, ctx: &CairoContext, cx: f64, cy: f64, brightness: f64) {
+        let pi = std::f64::consts::PI;
+        ctx.set_line_width(2.0);
+        ctx.set_line_cap(cairo::LineCap::Round);
+
+        // Brightness-based alpha (dimmer icon at low brightness)
+        let alpha = 0.5 + brightness * 0.5;
+        ctx.set_source_rgba(0.95, 0.85, 0.4, alpha);
+
+        // Sun center circle
+        ctx.arc(cx, cy, 5.0, 0.0, 2.0 * pi);
+        ctx.fill().ok();
+
+        // Sun rays
+        ctx.set_source_rgba(0.95, 0.85, 0.4, alpha);
+        let ray_count = 8;
+        let inner_radius = 7.0;
+        let outer_radius = 11.0;
+        for i in 0..ray_count {
+            let angle = (i as f64 / ray_count as f64) * 2.0 * pi;
+            let x1 = cx + inner_radius * angle.cos();
+            let y1 = cy + inner_radius * angle.sin();
+            let x2 = cx + outer_radius * angle.cos();
+            let y2 = cy + outer_radius * angle.sin();
+            ctx.move_to(x1, y1);
+            ctx.line_to(x2, y2);
+        }
+        ctx.stroke().ok();
     }
 
     /// Draw a rounded rectangle path
