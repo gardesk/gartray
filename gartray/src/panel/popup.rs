@@ -5,8 +5,9 @@
 use anyhow::{Context, Result};
 use cairo::{Context as CairoContext, Format, ImageSurface};
 use gartk_x11::{Connection, Window, WindowConfig};
-use x11rb::protocol::xproto::{ConnectionExt, EventMask};
+use x11rb::protocol::xproto::{ConnectionExt, EventMask, GrabMode};
 use x11rb::protocol::randr::ConnectionExt as RandrConnectionExt;
+use x11rb::CURRENT_TIME;
 use tracing::{debug, info, warn};
 
 use crate::config::PanelConfig;
@@ -144,6 +145,19 @@ impl PopupPanel {
             window.map()?;
             self.conn.flush()?;
             info!("Panel window {} mapped at ({}, {})", window.id(), self.pos_x, self.pos_y);
+
+            // Grab pointer to detect clicks outside the panel
+            let _ = self.conn.inner().grab_pointer(
+                true,  // owner_events - send events to owner window
+                window.id(),
+                EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::BUTTON1_MOTION,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+                x11rb::NONE,  // confine_to - don't confine
+                x11rb::NONE,  // cursor - use default
+                CURRENT_TIME,
+            );
+            self.conn.flush()?;
         }
 
         self.visible = true;
@@ -152,6 +166,9 @@ impl PopupPanel {
 
     /// Hide the panel
     pub fn hide(&mut self) -> Result<()> {
+        // Ungrab pointer first
+        let _ = self.conn.inner().ungrab_pointer(CURRENT_TIME);
+
         if let Some(ref window) = self.window {
             window.unmap()?;
             self.conn.flush()?;
@@ -578,11 +595,19 @@ impl PopupPanel {
                     }
                 }
                 x11rb::protocol::Event::ButtonPress(e) => {
-                    if self.window.as_ref().map(|w| w.id()) == Some(e.event) {
-                        // Button 1 = left click, start potential drag
-                        if e.detail == 1 {
-                            self.handle_button_press(e.event_x as f64, e.event_y as f64)?;
-                        }
+                    let x = e.event_x as i32;
+                    let y = e.event_y as i32;
+
+                    // Check if click is outside panel bounds (click-outside-to-close)
+                    if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+                        debug!("Click outside panel at ({}, {}), closing", x, y);
+                        self.hide()?;
+                        return Ok(true);
+                    }
+
+                    // Button 1 = left click, start potential drag
+                    if e.detail == 1 {
+                        self.handle_button_press(x as f64, y as f64)?;
                     }
                 }
                 x11rb::protocol::Event::ButtonRelease(e) => {
