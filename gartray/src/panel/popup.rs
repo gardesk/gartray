@@ -1176,6 +1176,17 @@ impl PopupPanel {
                     if let Err(e) = network.toggle_wifi() {
                         warn!("WiFi toggle failed: {}", e);
                     }
+                    // Scan for networks after toggle
+                    if let Err(e) = network.scan_networks() {
+                        debug!("WiFi scan failed: {}", e);
+                    } else {
+                        let aps = network.access_points();
+                        info!("Found {} WiFi networks", aps.len());
+                        for ap in aps.iter().take(5) {
+                            debug!("  {} ({}% {}) {}", ap.ssid, ap.strength, ap.security,
+                                   if ap.connected { "[connected]" } else { "" });
+                        }
+                    }
                 } else {
                     info!("WiFi not available");
                 }
