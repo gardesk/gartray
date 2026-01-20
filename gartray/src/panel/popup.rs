@@ -226,6 +226,11 @@ impl PopupPanel {
             let _ = network.scan_networks();
         }
 
+        // Refresh Bluetooth state to show connected devices
+        if let Some(ref mut bluetooth) = self.bluetooth {
+            let _ = bluetooth.scan_devices();
+        }
+
         self.create_window(x, y)?;
 
         if let Some(ref window) = self.window {
@@ -502,7 +507,16 @@ impl PopupPanel {
                 name: "wifi".to_string(), x: 16.0, y: grid_y, width: btn_width, height: btn_height, active: wifi_active,
             });
 
-            self.draw_toggle_button(&ctx, "Bluetooth", "bluetooth", bt_active, is_hovered("bluetooth"), 16.0 + btn_width + btn_spacing, grid_y, btn_width, btn_height)?;
+            // Bluetooth button label - show connected device name if any
+            let bt_label = if bt_active {
+                self.bluetooth.as_ref()
+                    .and_then(|b| b.devices().iter().find(|d| d.connected))
+                    .map(|d| if d.name.len() > 10 { format!("{}...", &d.name[..8]) } else { d.name.clone() })
+                    .unwrap_or_else(|| "Bluetooth".to_string())
+            } else {
+                "BT Off".to_string()
+            };
+            self.draw_toggle_button(&ctx, &bt_label, "bluetooth", bt_active, is_hovered("bluetooth"), 16.0 + btn_width + btn_spacing, grid_y, btn_width, btn_height)?;
             self.toggle_buttons.push(ToggleButton {
                 name: "bluetooth".to_string(), x: 16.0 + btn_width + btn_spacing, y: grid_y, width: btn_width, height: btn_height, active: bt_active,
             });
