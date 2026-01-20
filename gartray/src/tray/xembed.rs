@@ -133,6 +133,7 @@ impl XEmbedManager {
         debug!("Tray position: {}x{} at ({}, {})", tray_width, tray_height, x, y);
 
         // Create visible tray container window using gartk
+        // Use override_redirect to prevent WM from managing this window
         let tray_window = Window::create(
             conn.clone(),
             WindowConfig::new()
@@ -141,6 +142,7 @@ impl XEmbedManager {
                 .size(tray_width, tray_height)
                 .position(x as i32, y as i32)
                 .background(bg_color)
+                .override_redirect(true)
                 .map_on_create(true),
         )?;
 
