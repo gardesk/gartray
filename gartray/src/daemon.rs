@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::Receiver;
 use tokio::signal::unix::{signal, SignalKind};
 use tracing::{debug, info, warn};
 

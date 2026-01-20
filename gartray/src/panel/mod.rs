@@ -17,6 +17,5 @@ pub trait PanelModule {
     /// Update module state
     fn update(&mut self);
 
-    /// Render the module widget
-    // fn render(&self, renderer: &mut Renderer, rect: Rect);
+    // TODO: fn render(&self, renderer: &mut Renderer, rect: Rect);
 }

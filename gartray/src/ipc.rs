@@ -9,7 +9,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 /// Get the path to the IPC socket
 pub fn socket_path() -> PathBuf {
@@ -88,10 +88,9 @@ impl IpcServer {
             socket_path: socket_path(),
             listener: None,
             tx,
-            rx: Some(rx),
+            rx: None,
         };
-        let rx = server.rx.clone();
-        (server, rx.unwrap())
+        (server, rx)
     }
 
     /// Start listening for connections

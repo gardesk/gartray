@@ -5,12 +5,12 @@
 use std::collections::HashMap;
 use anyhow::{Context, Result};
 use gartk_x11::{Connection, Window, WindowConfig};
-use x11rb::connection::Connection as X11Connection;
 use x11rb::protocol::xproto::{
     self, Atom, AtomEnum, ClientMessageEvent, ConfigureWindowAux,
     ConnectionExt, CreateWindowAux, EventMask, PropMode, WindowClass,
 };
 use x11rb::protocol::Event;
+use x11rb::wrapper::ConnectionExt as WrapperConnectionExt;
 use tracing::{debug, info, warn};
 
 use crate::config::TrayConfig;

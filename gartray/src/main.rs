@@ -59,9 +59,13 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Daemon { foreground }) | None => {
+        Some(Commands::Daemon { foreground }) => {
             info!("Starting gartray daemon");
             daemon::run(cli.config, foreground || cli.foreground).await
+        }
+        None => {
+            info!("Starting gartray daemon");
+            daemon::run(cli.config, cli.foreground).await
         }
         Some(Commands::Panel) => {
             info!("Showing quick settings panel");
