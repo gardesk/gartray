@@ -2,12 +2,15 @@
 //!
 //! Each module provides a widget for the quick settings popup.
 
-// pub mod volume;
-// pub mod brightness;
-// pub mod network;
-// pub mod bluetooth;
-// pub mod battery;
-// pub mod power;
+pub mod popup;
+pub mod volume;
+pub mod brightness;
+pub mod battery;
+
+pub use popup::PopupPanel;
+pub use volume::VolumeModule;
+pub use brightness::BrightnessModule;
+pub use battery::BatteryModule;
 
 /// Panel module trait
 pub trait PanelModule {
@@ -16,6 +19,4 @@ pub trait PanelModule {
 
     /// Update module state
     fn update(&mut self);
-
-    // TODO: fn render(&self, renderer: &mut Renderer, rect: Rect);
 }
