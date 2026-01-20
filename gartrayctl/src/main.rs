@@ -3,6 +3,8 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+mod ipc;
+
 /// gartrayctl - Control the gartray daemon
 #[derive(Parser)]
 #[command(name = "gartrayctl")]
@@ -40,8 +42,5 @@ fn main() -> Result<()> {
         Commands::Quit => "quit",
     };
 
-    // TODO: Implement Unix socket IPC to daemon
-    println!("Would send command: {}", command);
-
-    Ok(())
+    ipc::send_command(command)
 }

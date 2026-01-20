@@ -19,3 +19,6 @@ clap = { workspace = true }
 
 # Error handling
 anyhow = { workspace = true }
+
+# System paths
+dirs = { workspace = true }
