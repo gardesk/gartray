@@ -254,6 +254,13 @@ impl XEmbedManager {
             Event::Expose(e) if e.window == self.tray_window.id() => {
                 // Redraw tray background if needed
             }
+            Event::ButtonPress(e) if e.event == self.tray_window.id() => {
+                // Forward click to appropriate icon
+                self.forward_button_event(e.event_x, e.event_y, e.detail, true)?;
+            }
+            Event::ButtonRelease(e) if e.event == self.tray_window.id() => {
+                self.forward_button_event(e.event_x, e.event_y, e.detail, false)?;
+            }
             _ => {}
         }
         Ok(())
@@ -339,6 +346,60 @@ impl XEmbedManager {
 
         self.update_tray_size()?;
         self.conn.flush()?;
+        Ok(())
+    }
+
+    /// Forward a button event to the appropriate icon
+    fn forward_button_event(&self, x: i16, y: i16, button: u8, press: bool) -> Result<()> {
+        let icon_size = self.config.icon_size as i16;
+        let spacing = self.config.spacing as i16;
+
+        // Find which icon was clicked based on x position
+        let mut icon_x: i16 = 0;
+        for icon in self.icons.values() {
+            if !icon.mapped {
+                continue;
+            }
+
+            if x >= icon_x && x < icon_x + icon_size {
+                // Found the icon - send button event
+                debug!("Forwarding button {} {} to icon {}", button, if press { "press" } else { "release" }, icon.window);
+
+                let event_type = if press {
+                    xproto::BUTTON_PRESS_EVENT
+                } else {
+                    xproto::BUTTON_RELEASE_EVENT
+                };
+
+                let event = xproto::ButtonPressEvent {
+                    response_type: event_type,
+                    detail: button,
+                    sequence: 0,
+                    time: x11rb::CURRENT_TIME,
+                    root: self.conn.root(),
+                    event: icon.window,
+                    child: 0,
+                    root_x: 0,
+                    root_y: 0,
+                    event_x: x - icon_x,
+                    event_y: y,
+                    state: xproto::KeyButMask::default(),
+                    same_screen: true,
+                };
+
+                self.conn.inner().send_event(
+                    false,
+                    icon.window,
+                    EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE,
+                    event,
+                )?;
+                self.conn.flush()?;
+                break;
+            }
+
+            icon_x += icon_size + spacing;
+        }
+
         Ok(())
     }
 
