@@ -214,19 +214,28 @@ impl NetworkModule {
     pub fn scan_networks(&mut self) -> Result<()> {
         let conn = match &self.conn {
             Some(c) => c,
-            None => return Ok(()),
+            None => {
+                debug!("No D-Bus connection for WiFi scan");
+                return Ok(());
+            }
         };
 
         if !self.state.wifi_available || !self.state.wifi_enabled {
+            debug!("WiFi not available or not enabled, skipping scan");
             self.state.access_points.clear();
             return Ok(());
         }
 
+        info!("Scanning for WiFi networks...");
+
         // Get wireless device
         let wifi_device = match self.get_wifi_device(conn) {
-            Some(d) => d,
+            Some(d) => {
+                info!("Found WiFi device: {}", d);
+                d
+            }
             None => {
-                debug!("No WiFi device found");
+                warn!("No WiFi device found");
                 return Ok(());
             }
         };
@@ -235,7 +244,13 @@ impl NetworkModule {
         let _ = self.request_scan(conn, &wifi_device);
 
         // Get access points
-        let aps = self.get_access_points(conn, &wifi_device)?;
+        let aps = match self.get_access_points(conn, &wifi_device) {
+            Ok(a) => a,
+            Err(e) => {
+                warn!("Failed to get access points: {}", e);
+                return Err(e);
+            }
+        };
 
         // Get active connection to find connected SSID
         self.state.connected_ssid = self.get_active_ssid(conn, &wifi_device);
@@ -258,7 +273,9 @@ impl NetworkModule {
             }
         });
 
-        debug!("Found {} access points", self.state.access_points.len());
+        info!("Found {} access points, connected: {:?}",
+              self.state.access_points.len(),
+              self.state.connected_ssid);
         Ok(())
     }
 
@@ -335,14 +352,24 @@ impl NetworkModule {
             &(),
         )?;
 
-        let ap_paths: Vec<zbus::zvariant::OwnedObjectPath> = reply.body().deserialize()?;
+        let body = reply.body();
+        let ap_paths: Vec<zbus::zvariant::OwnedObjectPath> = body.deserialize()?;
+        debug!("Got {} AP paths from D-Bus", ap_paths.len());
         let mut aps = Vec::new();
 
         for ap_path in ap_paths {
-            if let Ok(ap) = self.get_ap_info(conn, &ap_path.to_string()) {
-                // Skip hidden networks (empty SSID)
-                if !ap.ssid.is_empty() {
-                    aps.push(ap);
+            let path_str = ap_path.to_string();
+            debug!("Getting info for AP: {}", path_str);
+            match self.get_ap_info(conn, &path_str) {
+                Ok(ap) => {
+                    debug!("  SSID: '{}', strength: {}", ap.ssid, ap.strength);
+                    // Skip hidden networks (empty SSID)
+                    if !ap.ssid.is_empty() {
+                        aps.push(ap);
+                    }
+                }
+                Err(e) => {
+                    debug!("  Failed to get AP info: {}", e);
                 }
             }
         }
@@ -393,22 +420,37 @@ impl NetworkModule {
         )?;
 
         let body = reply.body();
-        let value: Value = body.deserialize()?;
-        let bytes = match value {
-            Value::Value(inner) => {
-                match *inner {
-                    Value::Array(arr) => {
-                        arr.iter()
-                            .filter_map(|v| if let Value::U8(b) = v { Some(*b) } else { None })
-                            .collect::<Vec<u8>>()
-                    }
-                    _ => return Err(anyhow::anyhow!("Expected byte array")),
+        // Properties.Get returns variant<ay> - try to deserialize directly
+        let variant: zbus::zvariant::OwnedValue = body.deserialize()?;
+
+        // Debug: print the variant structure
+        let json = serde_json::to_value(&variant).unwrap_or(serde_json::Value::Null);
+        debug!("SSID json: {}", json);
+
+        // The variant should contain an array of bytes
+        // Try different parsing strategies
+        if let serde_json::Value::Array(arr) = &json {
+            let bytes: Vec<u8> = arr.iter()
+                .filter_map(|v| v.as_u64().map(|n| n as u8))
+                .collect();
+            if !bytes.is_empty() {
+                return Ok(String::from_utf8_lossy(&bytes).to_string());
+            }
+        }
+
+        // Try as zvariant object with "zvariant::Value::Value" key
+        if let serde_json::Value::Object(obj) = &json {
+            if let Some(serde_json::Value::Array(arr)) = obj.get("zvariant::Value::Value") {
+                let bytes: Vec<u8> = arr.iter()
+                    .filter_map(|v| v.as_u64().map(|n| n as u8))
+                    .collect();
+                if !bytes.is_empty() {
+                    return Ok(String::from_utf8_lossy(&bytes).to_string());
                 }
             }
-            _ => return Err(anyhow::anyhow!("Expected variant")),
-        };
+        }
 
-        Ok(String::from_utf8_lossy(&bytes).to_string())
+        Err(anyhow::anyhow!("Could not parse SSID from: {}", json))
     }
 
     /// Get AP signal strength

@@ -221,6 +221,11 @@ impl PopupPanel {
             self.surface = None;
         }
 
+        // Refresh network state to show connected network
+        if let Some(ref mut network) = self.network {
+            let _ = network.scan_networks();
+        }
+
         self.create_window(x, y)?;
 
         if let Some(ref window) = self.window {
@@ -484,7 +489,15 @@ impl PopupPanel {
             let is_hovered = |name: &str| self.hovered_button.as_ref().map(|h| h == name).unwrap_or(false);
 
             // Row 1: WiFi, Bluetooth
-            self.draw_toggle_button(&ctx, "WiFi", "wifi", wifi_active, is_hovered("wifi"), 16.0, grid_y, btn_width, btn_height)?;
+            let wifi_label = if wifi_active {
+                self.network.as_ref()
+                    .and_then(|n| n.connected_ssid())
+                    .map(|s| if s.len() > 10 { format!("{}...", &s[..8]) } else { s.to_string() })
+                    .unwrap_or_else(|| "WiFi".to_string())
+            } else {
+                "WiFi Off".to_string()
+            };
+            self.draw_toggle_button(&ctx, &wifi_label, "wifi", wifi_active, is_hovered("wifi"), 16.0, grid_y, btn_width, btn_height)?;
             self.toggle_buttons.push(ToggleButton {
                 name: "wifi".to_string(), x: 16.0, y: grid_y, width: btn_width, height: btn_height, active: wifi_active,
             });
