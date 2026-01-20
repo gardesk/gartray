@@ -43,9 +43,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0"
 thiserror = "1.0"
 
-# Audio (PulseAudio)
-libpulse-binding = "2.0"
-
 # Utilities
 dirs = "5.0"
 shellexpand = "3.0"

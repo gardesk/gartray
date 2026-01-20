@@ -43,9 +43,6 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 
-# Audio
-libpulse-binding = { workspace = true }
-
 # Utilities
 dirs = { workspace = true }
 shellexpand = { workspace = true }
