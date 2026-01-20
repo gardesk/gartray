@@ -15,6 +15,21 @@ use tracing::{debug, info, warn};
 
 use crate::config::TrayConfig;
 
+/// Parse a hex color string like "#1a1a1a" to 0xAARRGGBB format
+fn parse_color(s: &str) -> Option<u32> {
+    let s = s.trim_start_matches('#');
+    if s.len() == 6 {
+        let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+        Some(0xFF000000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32))
+    } else if s.len() == 8 {
+        u32::from_str_radix(s, 16).ok()
+    } else {
+        None
+    }
+}
+
 /// System tray opcodes from the spec
 const SYSTEM_TRAY_REQUEST_DOCK: u32 = 0;
 
@@ -96,15 +111,36 @@ impl XEmbedManager {
 
         debug!("Created tray selection window: {}", selection_window);
 
+        // Parse background color from config
+        let bg_color = parse_color(&config.background).unwrap_or(0xFF1a1a1a);
+
+        // Get screen dimensions for positioning
+        let screen = conn.screen();
+        let screen_width = screen.width_in_pixels as i16;
+        let screen_height = screen.height_in_pixels as i16;
+        let tray_width = 200u32;
+        let tray_height = config.icon_size;
+
+        // Calculate position based on config
+        let (x, y) = match config.position.as_str() {
+            "top-left" => (8i16, 8i16),
+            "top-right" => (screen_width - tray_width as i16 - 8, 8),
+            "bottom-left" => (8, screen_height - tray_height as i16 - 8),
+            "bottom-right" => (screen_width - tray_width as i16 - 8, screen_height - tray_height as i16 - 8),
+            _ => (screen_width - tray_width as i16 - 8, 8), // default top-right
+        };
+
+        debug!("Tray position: {}x{} at ({}, {})", tray_width, tray_height, x, y);
+
         // Create visible tray container window using gartk
         let tray_window = Window::create(
             conn.clone(),
             WindowConfig::new()
                 .title("gartray")
                 .class("gartray")
-                .size(200, config.icon_size)
-                .position(100, 100)
-                .background(0xFF1a1a1a)
+                .size(tray_width, tray_height)
+                .position(x as i32, y as i32)
+                .background(bg_color)
                 .map_on_create(true),
         )?;
 
