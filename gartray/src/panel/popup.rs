@@ -817,21 +817,12 @@ impl PopupPanel {
         }
         ctx.fill().ok();
 
-        // Slider knob - position it so it doesn't overlap with percentage
+        // Slider knob
         let knob_x = slider_x + fill_width - 8.0;
         let knob_y = y + height / 2.0;
         ctx.arc(knob_x.max(slider_x), knob_y, 10.0, 0.0, 2.0 * std::f64::consts::PI);
         ctx.set_source_rgba(1.0, 1.0, 1.0, 0.95);
         ctx.fill().ok();
-
-        // Percentage text - moved to fixed position outside slider area
-        ctx.set_source_rgba(0.7, 0.7, 0.75, 1.0);
-        ctx.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
-        ctx.set_font_size(10.0);
-        let pct_text = format!("{:.0}%", value * 100.0);
-        // Position text at far right, with enough room for "100%"
-        ctx.move_to(x + width - 32.0, y + height / 2.0 + 4.0);
-        ctx.show_text(&pct_text).ok();
 
         Ok(())
     }
