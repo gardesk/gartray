@@ -52,6 +52,23 @@ struct ToggleButton {
     active: bool,
 }
 
+/// List item layout info (for WiFi/Bluetooth lists)
+#[derive(Debug, Clone)]
+struct ListItem {
+    /// Item identifier (SSID or device path)
+    id: String,
+    y: f64,
+    height: f64,
+}
+
+/// Expansion state for picker sections
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpandedSection {
+    None,
+    WiFi,
+    Bluetooth,
+}
+
 /// Quick settings popup panel
 pub struct PopupPanel {
     conn: Connection,
@@ -90,6 +107,12 @@ pub struct PopupPanel {
     drag_value: f64,
     /// Currently hovered button name (for hover effects)
     hovered_button: Option<String>,
+    /// Currently expanded section (WiFi or Bluetooth picker)
+    expanded: ExpandedSection,
+    /// List items for hit testing in expanded section
+    list_items: Vec<ListItem>,
+    /// Base panel height (without expansion)
+    base_height: u32,
 }
 
 impl PopupPanel {
@@ -209,6 +232,9 @@ impl PopupPanel {
             dragging: None,
             drag_value: 0.0,
             hovered_button: None,
+            expanded: ExpandedSection::None,
+            list_items: Vec::new(),
+            base_height: height,
         })
     }
 
@@ -288,6 +314,49 @@ impl PopupPanel {
         } else {
             self.show(x, y)
         }
+    }
+
+    /// Calculate and update panel height based on expanded section
+    fn update_panel_height(&mut self) -> Result<()> {
+        const LIST_ITEM_HEIGHT: u32 = 32;
+        const MAX_VISIBLE_ITEMS: u32 = 5;
+
+        let expansion_height = match self.expanded {
+            ExpandedSection::None => 0,
+            ExpandedSection::WiFi => {
+                let item_count = self.network.as_ref()
+                    .map(|n| n.access_points().len().min(MAX_VISIBLE_ITEMS as usize))
+                    .unwrap_or(0) as u32;
+                // At least show space for "No networks" message
+                let items = item_count.max(1);
+                items * LIST_ITEM_HEIGHT + 16 // 16px padding
+            }
+            ExpandedSection::Bluetooth => {
+                let item_count = self.bluetooth.as_ref()
+                    .map(|b| b.devices().len().min(MAX_VISIBLE_ITEMS as usize))
+                    .unwrap_or(0) as u32;
+                let items = item_count.max(1);
+                items * LIST_ITEM_HEIGHT + 16
+            }
+        };
+
+        let new_height = self.base_height + expansion_height;
+
+        if new_height != self.height {
+            self.height = new_height;
+            // Resize the window if it exists
+            if let Some(ref mut window) = self.window {
+                window.resize(self.width, self.height)?;
+                self.conn.flush()?;
+                debug!("Panel resized to {}x{}", self.width, self.height);
+            }
+            // Recreate surface at new size
+            self.surface = Some(ImageSurface::create(Format::ARgb32, self.width as i32, self.height as i32)?);
+            // Re-render
+            self.render()?;
+        }
+
+        Ok(())
     }
 
     /// Check if panel is visible
@@ -490,8 +559,9 @@ impl PopupPanel {
             let bt_active = self.bluetooth.as_ref().map(|b| b.is_powered()).unwrap_or(false);
             let dnd_active = self.dnd.as_ref().map(|d| d.is_enabled()).unwrap_or(false);
 
-            // Helper to check if a button is hovered
-            let is_hovered = |name: &str| self.hovered_button.as_ref().map(|h| h == name).unwrap_or(false);
+            // Helper to check if a button is hovered - clone to avoid borrow conflicts
+            let hovered_button = self.hovered_button.clone();
+            let is_hovered = |name: &str| hovered_button.as_ref().map(|h| h == name).unwrap_or(false);
 
             // Row 1: WiFi, Bluetooth
             let wifi_label = if wifi_active {
@@ -539,8 +609,22 @@ impl PopupPanel {
                 name: "dnd".to_string(), x: 16.0 + btn_width + btn_spacing, y: row2_y, width: btn_width, height: btn_height, active: dnd_active,
             });
 
+            // === Expanded Section (WiFi or Bluetooth picker) ===
+            let mut expansion_height = 0.0;
+            let expanded_y = row2_y + btn_height + btn_spacing;
+
+            match self.expanded {
+                ExpandedSection::WiFi => {
+                    expansion_height = self.render_wifi_list(&ctx, expanded_y)?;
+                }
+                ExpandedSection::Bluetooth => {
+                    expansion_height = self.render_bluetooth_list(&ctx, expanded_y)?;
+                }
+                ExpandedSection::None => {}
+            }
+
             // === Power Button Row (4 smaller buttons) ===
-            let power_y = row2_y + btn_height + btn_spacing;
+            let power_y = expanded_y + expansion_height + if expansion_height > 0.0 { 8.0 } else { 0.0 };
             let power_btn_width = (self.width as f64 - 56.0) / 4.0;  // 4 columns
             let power_btn_height = 50.0;
             let power_spacing = 8.0;
@@ -1003,6 +1087,197 @@ impl PopupPanel {
         ctx.stroke().ok();
     }
 
+    /// Render WiFi network list, returns height used
+    fn render_wifi_list(&mut self, ctx: &CairoContext, start_y: f64) -> Result<f64> {
+        const ITEM_HEIGHT: f64 = 32.0;
+        const MAX_ITEMS: usize = 5;
+        const PADDING: f64 = 8.0;
+
+        self.list_items.clear();
+
+        let networks: Vec<_> = self.network.as_ref()
+            .map(|n| n.access_points().to_vec())
+            .unwrap_or_default();
+
+        if networks.is_empty() {
+            // Draw "No networks found" message
+            ctx.set_source_rgba(0.6, 0.6, 0.6, 1.0);
+            ctx.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+            ctx.set_font_size(12.0);
+            ctx.move_to(16.0 + PADDING, start_y + ITEM_HEIGHT / 2.0 + 4.0);
+            ctx.show_text("No WiFi networks found").ok();
+            return Ok(ITEM_HEIGHT + PADDING);
+        }
+
+        let mut y = start_y;
+        for (i, ap) in networks.iter().take(MAX_ITEMS).enumerate() {
+            let item_y = y;
+
+            // Background for connected item
+            if ap.connected {
+                ctx.set_source_rgba(0.2, 0.4, 0.6, 0.3);
+                self.draw_rounded_rect(ctx, 16.0, item_y, self.width as f64 - 32.0, ITEM_HEIGHT - 2.0, 4.0);
+                ctx.fill().ok();
+            }
+
+            // Connected indicator
+            if ap.connected {
+                ctx.set_source_rgba(0.3, 0.7, 0.4, 1.0);
+                ctx.arc(24.0, item_y + ITEM_HEIGHT / 2.0, 4.0, 0.0, 2.0 * std::f64::consts::PI);
+                ctx.fill().ok();
+            }
+
+            // SSID name
+            ctx.set_source_rgba(0.9, 0.9, 0.9, 1.0);
+            ctx.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+            ctx.set_font_size(13.0);
+            let ssid_x = if ap.connected { 36.0 } else { 24.0 };
+            let ssid = if ap.ssid.len() > 20 {
+                format!("{}...", &ap.ssid[..18])
+            } else {
+                ap.ssid.clone()
+            };
+            ctx.move_to(ssid_x, item_y + ITEM_HEIGHT / 2.0 + 4.0);
+            ctx.show_text(&ssid).ok();
+
+            // Signal strength bars (5 bars)
+            let bar_x = self.width as f64 - 80.0;
+            let bar_width = 3.0;
+            let bar_spacing = 2.0;
+            let max_bar_height = 14.0;
+            let strength = ap.strength as f64 / 100.0;
+
+            for bar in 0..5 {
+                let bar_height = max_bar_height * (bar as f64 + 1.0) / 5.0;
+                let filled = strength >= (bar as f64 + 1.0) / 5.0;
+
+                if filled {
+                    ctx.set_source_rgba(0.3, 0.7, 0.4, 1.0);
+                } else {
+                    ctx.set_source_rgba(0.3, 0.3, 0.3, 1.0);
+                }
+
+                let bx = bar_x + bar as f64 * (bar_width + bar_spacing);
+                let by = item_y + (ITEM_HEIGHT - bar_height) / 2.0;
+                ctx.rectangle(bx, by, bar_width, bar_height);
+                ctx.fill().ok();
+            }
+
+            // Security label
+            ctx.set_source_rgba(0.6, 0.6, 0.6, 1.0);
+            ctx.set_font_size(10.0);
+            ctx.move_to(self.width as f64 - 45.0, item_y + ITEM_HEIGHT / 2.0 + 3.0);
+            ctx.show_text(&ap.security).ok();
+
+            // Track list item for click handling
+            self.list_items.push(ListItem {
+                id: ap.ssid.clone(),
+                y: item_y,
+                height: ITEM_HEIGHT,
+            });
+
+            y += ITEM_HEIGHT;
+        }
+
+        // Show count if more items
+        if networks.len() > MAX_ITEMS {
+            ctx.set_source_rgba(0.5, 0.5, 0.5, 1.0);
+            ctx.set_font_size(11.0);
+            ctx.move_to(16.0 + PADDING, y + 12.0);
+            ctx.show_text(&format!("+{} more networks", networks.len() - MAX_ITEMS)).ok();
+            y += 20.0;
+        }
+
+        Ok(y - start_y + PADDING)
+    }
+
+    /// Render Bluetooth device list, returns height used
+    fn render_bluetooth_list(&mut self, ctx: &CairoContext, start_y: f64) -> Result<f64> {
+        const ITEM_HEIGHT: f64 = 32.0;
+        const MAX_ITEMS: usize = 5;
+        const PADDING: f64 = 8.0;
+
+        self.list_items.clear();
+
+        let devices: Vec<_> = self.bluetooth.as_ref()
+            .map(|b| b.devices().to_vec())
+            .unwrap_or_default();
+
+        if devices.is_empty() {
+            ctx.set_source_rgba(0.6, 0.6, 0.6, 1.0);
+            ctx.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+            ctx.set_font_size(12.0);
+            ctx.move_to(16.0 + PADDING, start_y + ITEM_HEIGHT / 2.0 + 4.0);
+            ctx.show_text("No Bluetooth devices").ok();
+            return Ok(ITEM_HEIGHT + PADDING);
+        }
+
+        let mut y = start_y;
+        for device in devices.iter().take(MAX_ITEMS) {
+            let item_y = y;
+
+            // Background for connected item
+            if device.connected {
+                ctx.set_source_rgba(0.2, 0.4, 0.6, 0.3);
+                self.draw_rounded_rect(ctx, 16.0, item_y, self.width as f64 - 32.0, ITEM_HEIGHT - 2.0, 4.0);
+                ctx.fill().ok();
+            }
+
+            // Connected indicator
+            if device.connected {
+                ctx.set_source_rgba(0.3, 0.7, 0.4, 1.0);
+                ctx.arc(24.0, item_y + ITEM_HEIGHT / 2.0, 4.0, 0.0, 2.0 * std::f64::consts::PI);
+                ctx.fill().ok();
+            }
+
+            // Device name
+            ctx.set_source_rgba(0.9, 0.9, 0.9, 1.0);
+            ctx.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+            ctx.set_font_size(13.0);
+            let name_x = if device.connected { 36.0 } else { 24.0 };
+            let name = if device.name.len() > 20 {
+                format!("{}...", &device.name[..18])
+            } else {
+                device.name.clone()
+            };
+            ctx.move_to(name_x, item_y + ITEM_HEIGHT / 2.0 + 4.0);
+            ctx.show_text(&name).ok();
+
+            // Status label
+            let status = if device.connected {
+                "Connected"
+            } else if device.paired {
+                "Paired"
+            } else {
+                "Available"
+            };
+            ctx.set_source_rgba(0.6, 0.6, 0.6, 1.0);
+            ctx.set_font_size(10.0);
+            ctx.move_to(self.width as f64 - 70.0, item_y + ITEM_HEIGHT / 2.0 + 3.0);
+            ctx.show_text(status).ok();
+
+            // Track list item for click handling
+            self.list_items.push(ListItem {
+                id: device.path.clone(),
+                y: item_y,
+                height: ITEM_HEIGHT,
+            });
+
+            y += ITEM_HEIGHT;
+        }
+
+        // Show count if more items
+        if devices.len() > MAX_ITEMS {
+            ctx.set_source_rgba(0.5, 0.5, 0.5, 1.0);
+            ctx.set_font_size(11.0);
+            ctx.move_to(16.0 + PADDING, y + 12.0);
+            ctx.show_text(&format!("+{} more devices", devices.len() - MAX_ITEMS)).ok();
+            y += 20.0;
+        }
+
+        Ok(y - start_y + PADDING)
+    }
+
     /// Draw a rounded rectangle path
     fn draw_rounded_rect(&self, ctx: &CairoContext, x: f64, y: f64, w: f64, h: f64, r: f64) {
         let degrees = std::f64::consts::PI / 180.0;
@@ -1133,6 +1408,19 @@ impl PopupPanel {
             }
         }
 
+        // Check list items (WiFi networks or Bluetooth devices)
+        let items = self.list_items.clone();
+        let expanded = self.expanded;
+        for item in &items {
+            // Check if click is within item's row (full width minus padding)
+            if y >= item.y && y < item.y + item.height && x >= 16.0 && x < (self.width as f64 - 16.0) {
+                info!("List item '{}' clicked", item.id);
+                self.handle_list_item_click(&item.id, expanded)?;
+                self.render()?;
+                return Ok(());
+            }
+        }
+
         // Check slider rows
         let rows = self.slider_rows.clone();
         for row in &rows {
@@ -1197,36 +1485,47 @@ impl PopupPanel {
                     }
                 }
             }
-            // WiFi via NetworkManager D-Bus
+            // WiFi - toggle expansion or scan
             "wifi" => {
-                if let Some(ref mut network) = self.network {
-                    if let Err(e) = network.toggle_wifi() {
-                        warn!("WiFi toggle failed: {}", e);
-                    }
-                    // Scan for networks after toggle
-                    if let Err(e) = network.scan_networks() {
-                        debug!("WiFi scan failed: {}", e);
-                    } else {
-                        let aps = network.access_points();
-                        info!("Found {} WiFi networks", aps.len());
-                        for ap in aps.iter().take(5) {
-                            debug!("  {} ({}% {}) {}", ap.ssid, ap.strength, ap.security,
-                                   if ap.connected { "[connected]" } else { "" });
+                if self.expanded == ExpandedSection::WiFi {
+                    // Collapse
+                    self.expanded = ExpandedSection::None;
+                    info!("WiFi picker collapsed");
+                } else {
+                    // Expand and scan
+                    self.expanded = ExpandedSection::WiFi;
+                    if let Some(ref mut network) = self.network {
+                        if let Err(e) = network.scan_networks() {
+                            debug!("WiFi scan failed: {}", e);
+                        } else {
+                            let aps = network.access_points();
+                            info!("WiFi picker expanded, {} networks", aps.len());
                         }
                     }
-                } else {
-                    info!("WiFi not available");
                 }
+                // Recalculate height and resize window
+                self.update_panel_height()?;
             }
-            // Bluetooth via BlueZ D-Bus
+            // Bluetooth - toggle expansion or scan
             "bluetooth" => {
-                if let Some(ref mut bt) = self.bluetooth {
-                    if let Err(e) = bt.toggle() {
-                        warn!("Bluetooth toggle failed: {}", e);
-                    }
+                if self.expanded == ExpandedSection::Bluetooth {
+                    // Collapse
+                    self.expanded = ExpandedSection::None;
+                    info!("Bluetooth picker collapsed");
                 } else {
-                    info!("Bluetooth not available");
+                    // Expand and scan
+                    self.expanded = ExpandedSection::Bluetooth;
+                    if let Some(ref mut bt) = self.bluetooth {
+                        if let Err(e) = bt.scan_devices() {
+                            debug!("Bluetooth scan failed: {}", e);
+                        } else {
+                            let devices = bt.devices();
+                            info!("Bluetooth picker expanded, {} devices", devices.len());
+                        }
+                    }
                 }
+                // Recalculate height and resize window
+                self.update_panel_height()?;
             }
             // DND via dunstctl or local state
             "dnd" => {
@@ -1243,6 +1542,65 @@ impl PopupPanel {
             _ => {
                 debug!("Unknown toggle button: {}", name);
             }
+        }
+        Ok(())
+    }
+
+    /// Handle list item click (WiFi network or Bluetooth device)
+    fn handle_list_item_click(&mut self, id: &str, section: ExpandedSection) -> Result<()> {
+        match section {
+            ExpandedSection::WiFi => {
+                // id is the SSID
+                if let Some(ref mut network) = self.network {
+                    let aps = network.access_points();
+                    // Check if already connected to this network
+                    let is_connected = network.connected_ssid()
+                        .map(|s| s == id)
+                        .unwrap_or(false);
+
+                    if is_connected {
+                        // Disconnect
+                        info!("Disconnecting from WiFi network: {}", id);
+                        if let Err(e) = network.disconnect() {
+                            warn!("WiFi disconnect failed: {}", e);
+                        }
+                    } else {
+                        // Connect to the network
+                        info!("Connecting to WiFi network: {}", id);
+                        if let Err(e) = network.connect_to_network(id) {
+                            warn!("WiFi connect failed: {}", e);
+                        }
+                    }
+                    // Refresh network list
+                    let _ = network.scan_networks();
+                }
+            }
+            ExpandedSection::Bluetooth => {
+                // id is the device path
+                if let Some(ref mut bt) = self.bluetooth {
+                    let devices = bt.devices();
+                    // Find device and check connection status
+                    let device = devices.iter().find(|d| d.path == id);
+                    if let Some(dev) = device {
+                        if dev.connected {
+                            // Disconnect
+                            info!("Disconnecting Bluetooth device: {} ({})", dev.name, id);
+                            if let Err(e) = bt.disconnect_device(id) {
+                                warn!("Bluetooth disconnect failed: {}", e);
+                            }
+                        } else {
+                            // Connect
+                            info!("Connecting Bluetooth device: {} ({})", dev.name, id);
+                            if let Err(e) = bt.connect_device(id) {
+                                warn!("Bluetooth connect failed: {}", e);
+                            }
+                        }
+                    }
+                    // Refresh device list
+                    let _ = bt.scan_devices();
+                }
+            }
+            ExpandedSection::None => {}
         }
         Ok(())
     }
