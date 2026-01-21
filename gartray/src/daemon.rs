@@ -196,13 +196,17 @@ impl Daemon {
     pub fn init_x11(&mut self) -> Result<()> {
         info!("Initializing X11 connection...");
 
-        let mut xembed = XEmbedManager::new(&self.config.tray)?;
+        if self.config.tray.enabled {
+            let mut xembed = XEmbedManager::new(&self.config.tray)?;
 
-        if xembed.acquire_selection() {
-            info!("Acquired system tray selection");
-            self.xembed = Some(xembed);
+            if xembed.acquire_selection() {
+                info!("Acquired system tray selection");
+                self.xembed = Some(xembed);
+            } else {
+                warn!("Failed to acquire tray selection (another tray running?)");
+            }
         } else {
-            warn!("Failed to acquire tray selection (another tray running?)");
+            info!("XEmbed system tray disabled in config");
         }
 
         Ok(())
