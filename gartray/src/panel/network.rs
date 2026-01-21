@@ -212,6 +212,9 @@ impl NetworkModule {
 
     /// Scan for WiFi networks
     pub fn scan_networks(&mut self) -> Result<()> {
+        // Refresh wifi_enabled state before scanning (may have changed since startup)
+        self.update_state()?;
+
         let conn = match &self.conn {
             Some(c) => c,
             None => {
