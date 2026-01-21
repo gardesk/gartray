@@ -27,6 +27,7 @@ fn pid_file_path() -> PathBuf {
 /// Check if an existing daemon is running
 fn check_existing_daemon() -> Result<()> {
     let pid_path = pid_file_path();
+    let socket_path = crate::ipc::socket_path();
 
     if pid_path.exists() {
         let pid_str = fs::read_to_string(&pid_path)?;
@@ -42,7 +43,16 @@ fn check_existing_daemon() -> Result<()> {
         } else {
             warn!("Removing stale PID file for PID {}", pid);
             fs::remove_file(&pid_path)?;
+            // Also clean up stale socket
+            if socket_path.exists() {
+                warn!("Removing stale socket file");
+                let _ = fs::remove_file(&socket_path);
+            }
         }
+    } else if socket_path.exists() {
+        // Socket exists but no PID file - orphaned socket
+        warn!("Removing orphaned socket file (no PID file)");
+        let _ = fs::remove_file(&socket_path);
     }
 
     Ok(())
