@@ -27,6 +27,8 @@ impl Default for Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TrayConfig {
+    /// Whether the XEmbed system tray is enabled (for legacy tray icons)
+    pub enabled: bool,
     /// Tray position: top-left, top-right, bottom-left, bottom-right
     pub position: String,
     /// Icon size in pixels
@@ -48,6 +50,7 @@ pub struct TrayConfig {
 impl Default for TrayConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             position: "top-right".to_string(),
             icon_size: 22,
             spacing: 8.0,
