@@ -113,6 +113,10 @@ pub struct PopupPanel {
     list_items: Vec<ListItem>,
     /// Base panel height (without expansion)
     base_height: u32,
+    /// Button press start time (for hold detection)
+    press_start: Option<std::time::Instant>,
+    /// Which button is being pressed (for hold detection)
+    press_button: Option<String>,
 }
 
 impl PopupPanel {
@@ -235,6 +239,8 @@ impl PopupPanel {
             expanded: ExpandedSection::None,
             list_items: Vec::new(),
             base_height: height,
+            press_start: None,
+            press_button: None,
         })
     }
 
@@ -1188,6 +1194,13 @@ impl PopupPanel {
             y += 20.0;
         }
 
+        // Hint for hold-to-toggle
+        ctx.set_source_rgba(0.45, 0.45, 0.5, 1.0);
+        ctx.set_font_size(10.0);
+        ctx.move_to(16.0 + PADDING, y + 14.0);
+        ctx.show_text("Hold WiFi button to turn off").ok();
+        y += 20.0;
+
         Ok(y - start_y + PADDING)
     }
 
@@ -1274,6 +1287,13 @@ impl PopupPanel {
             ctx.show_text(&format!("+{} more devices", devices.len() - MAX_ITEMS)).ok();
             y += 20.0;
         }
+
+        // Hint for hold-to-toggle
+        ctx.set_source_rgba(0.45, 0.45, 0.5, 1.0);
+        ctx.set_font_size(10.0);
+        ctx.move_to(16.0 + PADDING, y + 14.0);
+        ctx.show_text("Hold Bluetooth button to turn off").ok();
+        y += 20.0;
 
         Ok(y - start_y + PADDING)
     }
@@ -1362,13 +1382,33 @@ impl PopupPanel {
                         return Ok(true);
                     }
 
-                    // Button 1 = left click, start potential drag
+                    // Button 1 = left click, start potential drag or hold
                     if e.detail == 1 {
                         self.handle_button_press(x as f64, y as f64)?;
                     }
                 }
                 x11rb::protocol::Event::ButtonRelease(e) => {
                     if self.window.as_ref().map(|w| w.id()) == Some(e.event) && e.detail == 1 {
+                        // Check for hold action on wifi/bluetooth
+                        if let Some(press_start) = self.press_start.take() {
+                            let held_button = self.press_button.take();
+                            let duration = press_start.elapsed();
+                            const HOLD_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(500);
+
+                            if let Some(btn_name) = held_button {
+                                if duration >= HOLD_THRESHOLD {
+                                    // Long hold - toggle power
+                                    info!("Long hold on '{}' ({:?}) - toggling power", btn_name, duration);
+                                    self.handle_hold_action(&btn_name)?;
+                                } else {
+                                    // Short click - expand/collapse
+                                    info!("Short click on '{}' ({:?}) - toggling list", btn_name, duration);
+                                    self.handle_click_action(&btn_name)?;
+                                }
+                                self.render()?;
+                            }
+                        }
+
                         // End drag - apply the final value
                         if let Some(ref module_name) = self.dragging.take() {
                             self.apply_slider_value(module_name, self.drag_value)?;
@@ -1397,10 +1437,22 @@ impl PopupPanel {
     fn handle_button_press(&mut self, x: f64, y: f64) -> Result<()> {
         debug!("Panel button press at ({}, {})", x, y);
 
+        // Clear any previous press state
+        self.press_start = None;
+        self.press_button = None;
+
         // Check toggle buttons first
         let buttons = self.toggle_buttons.clone();
         for btn in &buttons {
             if x >= btn.x && x < btn.x + btn.width && y >= btn.y && y < btn.y + btn.height {
+                // WiFi and Bluetooth support hold-to-toggle-power
+                if btn.name == "wifi" || btn.name == "bluetooth" {
+                    debug!("Starting hold timer for '{}'", btn.name);
+                    self.press_start = Some(std::time::Instant::now());
+                    self.press_button = Some(btn.name.clone());
+                    return Ok(());
+                }
+                // Other buttons act immediately
                 info!("Toggle button '{}' clicked", btn.name);
                 self.handle_toggle_action(&btn.name)?;
                 self.render()?;
@@ -1542,6 +1594,94 @@ impl PopupPanel {
             _ => {
                 debug!("Unknown toggle button: {}", name);
             }
+        }
+        Ok(())
+    }
+
+    /// Handle short click on WiFi/Bluetooth - expand/collapse list
+    fn handle_click_action(&mut self, name: &str) -> Result<()> {
+        match name {
+            "wifi" => {
+                if self.expanded == ExpandedSection::WiFi {
+                    self.expanded = ExpandedSection::None;
+                    info!("WiFi picker collapsed");
+                } else {
+                    self.expanded = ExpandedSection::WiFi;
+                    if let Some(ref mut network) = self.network {
+                        if let Err(e) = network.scan_networks() {
+                            debug!("WiFi scan failed: {}", e);
+                        } else {
+                            let aps = network.access_points();
+                            info!("WiFi picker expanded, {} networks", aps.len());
+                        }
+                    }
+                }
+                self.update_panel_height()?;
+            }
+            "bluetooth" => {
+                if self.expanded == ExpandedSection::Bluetooth {
+                    self.expanded = ExpandedSection::None;
+                    info!("Bluetooth picker collapsed");
+                } else {
+                    self.expanded = ExpandedSection::Bluetooth;
+                    if let Some(ref mut bt) = self.bluetooth {
+                        if let Err(e) = bt.scan_devices() {
+                            debug!("Bluetooth scan failed: {}", e);
+                        } else {
+                            let devices = bt.devices();
+                            info!("Bluetooth picker expanded, {} devices", devices.len());
+                        }
+                    }
+                }
+                self.update_panel_height()?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Handle long hold on WiFi/Bluetooth - toggle power on/off
+    fn handle_hold_action(&mut self, name: &str) -> Result<()> {
+        match name {
+            "wifi" => {
+                if let Some(ref mut network) = self.network {
+                    let currently_enabled = network.is_wifi_enabled();
+                    if currently_enabled {
+                        info!("Turning WiFi OFF");
+                        if let Err(e) = network.disable_wifi() {
+                            warn!("Failed to disable WiFi: {}", e);
+                        }
+                    } else {
+                        info!("Turning WiFi ON");
+                        if let Err(e) = network.enable_wifi() {
+                            warn!("Failed to enable WiFi: {}", e);
+                        }
+                    }
+                    // Collapse list and refresh state
+                    self.expanded = ExpandedSection::None;
+                    self.update_panel_height()?;
+                }
+            }
+            "bluetooth" => {
+                if let Some(ref mut bt) = self.bluetooth {
+                    let currently_powered = bt.is_powered();
+                    if currently_powered {
+                        info!("Turning Bluetooth OFF");
+                        if let Err(e) = bt.power_off() {
+                            warn!("Failed to power off Bluetooth: {}", e);
+                        }
+                    } else {
+                        info!("Turning Bluetooth ON");
+                        if let Err(e) = bt.power_on() {
+                            warn!("Failed to power on Bluetooth: {}", e);
+                        }
+                    }
+                    // Collapse list and refresh state
+                    self.expanded = ExpandedSection::None;
+                    self.update_panel_height()?;
+                }
+            }
+            _ => {}
         }
         Ok(())
     }
