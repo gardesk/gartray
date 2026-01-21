@@ -269,25 +269,40 @@ impl PopupPanel {
             info!("Panel window {} mapped at ({}, {})", window.id(), self.pos_x, self.pos_y);
 
             // Grab pointer to detect clicks outside the panel
-            // Use async grab mode to avoid blocking and pointer jumping
-            match self.conn.inner().grab_pointer(
-                false,  // owner_events - false to get all events to grab window
-                window.id(),
-                EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
-                GrabMode::ASYNC,
-                GrabMode::ASYNC,
-                x11rb::NONE,  // confine_to - don't confine
-                x11rb::NONE,  // cursor - use default
-                CURRENT_TIME,
-            ) {
-                Ok(cookie) => {
-                    if let Ok(reply) = cookie.reply() {
-                        debug!("Pointer grab status: {:?}", reply.status);
+            // Retry a few times in case another app (e.g., garbar) has the implicit button grab
+            let mut grab_success = false;
+            for attempt in 0..5 {
+                if attempt > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                match self.conn.inner().grab_pointer(
+                    false,  // owner_events - false to get all events to grab window
+                    window.id(),
+                    EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
+                    GrabMode::ASYNC,
+                    GrabMode::ASYNC,
+                    x11rb::NONE,  // confine_to - don't confine
+                    x11rb::NONE,  // cursor - use default
+                    CURRENT_TIME,
+                ) {
+                    Ok(cookie) => {
+                        if let Ok(reply) = cookie.reply() {
+                            use x11rb::protocol::xproto::GrabStatus;
+                            debug!("Pointer grab attempt {}: {:?}", attempt + 1, reply.status);
+                            if reply.status == GrabStatus::SUCCESS {
+                                grab_success = true;
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to grab pointer: {}", e);
+                        break;
                     }
                 }
-                Err(e) => {
-                    warn!("Failed to grab pointer: {}", e);
-                }
+            }
+            if !grab_success {
+                debug!("Pointer grab failed after retries, click-outside-to-close may not work");
             }
             self.conn.flush()?;
         }
