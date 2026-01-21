@@ -31,6 +31,8 @@ pub struct NetworkState {
     pub connected_ssid: Option<String>,
     /// Available access points
     pub access_points: Vec<AccessPoint>,
+    /// Whether a scan is in progress
+    pub scanning: bool,
 }
 
 /// Network module via NetworkManager D-Bus
@@ -210,6 +212,16 @@ impl NetworkModule {
         &self.state.access_points
     }
 
+    /// Check if scan is in progress
+    pub fn is_scanning(&self) -> bool {
+        self.state.scanning
+    }
+
+    /// Mark scan as starting (for UI feedback before blocking scan)
+    pub fn set_scanning(&mut self, scanning: bool) {
+        self.state.scanning = scanning;
+    }
+
     /// Scan for WiFi networks
     pub fn scan_networks(&mut self) -> Result<()> {
         // Refresh wifi_enabled state before scanning (may have changed since startup)
@@ -226,10 +238,12 @@ impl NetworkModule {
         if !self.state.wifi_available || !self.state.wifi_enabled {
             debug!("WiFi not available or not enabled, skipping scan");
             self.state.access_points.clear();
+            self.state.scanning = false;
             return Ok(());
         }
 
         info!("Scanning for WiFi networks...");
+        self.state.scanning = true;
 
         // Get wireless device
         let wifi_device = match self.get_wifi_device(conn) {
@@ -239,12 +253,16 @@ impl NetworkModule {
             }
             None => {
                 warn!("No WiFi device found");
+                self.state.scanning = false;
                 return Ok(());
             }
         };
 
-        // Request scan (async, results come later)
-        let _ = self.request_scan(conn, &wifi_device);
+        // Request scan and wait briefly for adapter to discover networks
+        if self.request_scan(conn, &wifi_device).is_ok() {
+            // Give the adapter time to scan (especially after WiFi was just enabled)
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+        }
 
         // Get access points
         let aps = match self.get_access_points(conn, &wifi_device) {
@@ -276,6 +294,7 @@ impl NetworkModule {
             }
         });
 
+        self.state.scanning = false;
         info!("Found {} access points, connected: {:?}",
               self.state.access_points.len(),
               self.state.connected_ssid);

@@ -1101,17 +1101,24 @@ impl PopupPanel {
 
         self.list_items.clear();
 
+        // Check if scanning
+        let is_scanning = self.network.as_ref().map(|n| n.is_scanning()).unwrap_or(false);
+
         let networks: Vec<_> = self.network.as_ref()
             .map(|n| n.access_points().to_vec())
             .unwrap_or_default();
 
-        if networks.is_empty() {
-            // Draw "No networks found" message
+        if is_scanning || networks.is_empty() {
             ctx.set_source_rgba(0.6, 0.6, 0.6, 1.0);
             ctx.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
             ctx.set_font_size(12.0);
             ctx.move_to(16.0 + PADDING, start_y + ITEM_HEIGHT / 2.0 + 4.0);
-            ctx.show_text("No WiFi networks found").ok();
+            if is_scanning {
+                // Draw spinner dots animation hint
+                ctx.show_text("Scanning for networks...").ok();
+            } else {
+                ctx.show_text("No WiFi networks found").ok();
+            }
             return Ok(ITEM_HEIGHT + PADDING);
         }
 
@@ -1348,6 +1355,19 @@ impl PopupPanel {
 
     /// Process X11 events for the panel
     pub fn process_events(&mut self) -> Result<bool> {
+        // Check for hold threshold while still pressing (fires before release)
+        if let Some(press_start) = self.press_start {
+            const HOLD_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(500);
+            if press_start.elapsed() >= HOLD_THRESHOLD {
+                if let Some(btn_name) = self.press_button.take() {
+                    self.press_start = None;
+                    info!("Hold threshold reached on '{}' - toggling power", btn_name);
+                    self.handle_hold_action(&btn_name)?;
+                    self.render()?;
+                }
+            }
+        }
+
         while let Some(event) = self.conn.poll_event()? {
             match event {
                 x11rb::protocol::Event::Expose(e) => {
@@ -1389,23 +1409,20 @@ impl PopupPanel {
                 }
                 x11rb::protocol::Event::ButtonRelease(e) => {
                     if self.window.as_ref().map(|w| w.id()) == Some(e.event) && e.detail == 1 {
-                        // Check for hold action on wifi/bluetooth
+                        // Check for click action (hold action fires proactively in process_events)
                         if let Some(press_start) = self.press_start.take() {
                             let held_button = self.press_button.take();
                             let duration = press_start.elapsed();
                             const HOLD_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(500);
 
                             if let Some(btn_name) = held_button {
-                                if duration >= HOLD_THRESHOLD {
-                                    // Long hold - toggle power
-                                    info!("Long hold on '{}' ({:?}) - toggling power", btn_name, duration);
-                                    self.handle_hold_action(&btn_name)?;
-                                } else {
+                                if duration < HOLD_THRESHOLD {
                                     // Short click - expand/collapse
                                     info!("Short click on '{}' ({:?}) - toggling list", btn_name, duration);
                                     self.handle_click_action(&btn_name)?;
+                                    self.render()?;
                                 }
-                                self.render()?;
+                                // Note: hold action already fired proactively, no need to handle here
                             }
                         }
 
@@ -1605,8 +1622,17 @@ impl PopupPanel {
                 if self.expanded == ExpandedSection::WiFi {
                     self.expanded = ExpandedSection::None;
                     info!("WiFi picker collapsed");
+                    self.update_panel_height()?;
                 } else {
                     self.expanded = ExpandedSection::WiFi;
+                    // Set scanning state and render "Scanning..." before blocking scan
+                    if let Some(ref mut network) = self.network {
+                        network.set_scanning(true);
+                    }
+                    self.update_panel_height()?;
+                    self.render()?;
+                    self.conn.flush()?;
+
                     if let Some(ref mut network) = self.network {
                         if let Err(e) = network.scan_networks() {
                             debug!("WiFi scan failed: {}", e);
@@ -1615,15 +1641,22 @@ impl PopupPanel {
                             info!("WiFi picker expanded, {} networks", aps.len());
                         }
                     }
+                    // Panel height may change after scan results
+                    self.update_panel_height()?;
                 }
-                self.update_panel_height()?;
             }
             "bluetooth" => {
                 if self.expanded == ExpandedSection::Bluetooth {
                     self.expanded = ExpandedSection::None;
                     info!("Bluetooth picker collapsed");
+                    self.update_panel_height()?;
                 } else {
                     self.expanded = ExpandedSection::Bluetooth;
+                    // Show "Scanning..." immediately before blocking scan
+                    self.update_panel_height()?;
+                    self.render()?;
+                    self.conn.flush()?;
+
                     if let Some(ref mut bt) = self.bluetooth {
                         if let Err(e) = bt.scan_devices() {
                             debug!("Bluetooth scan failed: {}", e);
@@ -1632,8 +1665,8 @@ impl PopupPanel {
                             info!("Bluetooth picker expanded, {} devices", devices.len());
                         }
                     }
+                    self.update_panel_height()?;
                 }
-                self.update_panel_height()?;
             }
             _ => {}
         }
