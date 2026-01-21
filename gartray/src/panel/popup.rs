@@ -507,6 +507,7 @@ impl PopupPanel {
                         | EventMask::EXPOSURE
                         | EventMask::BUTTON_PRESS
                         | EventMask::BUTTON_RELEASE
+                        | EventMask::POINTER_MOTION  // For hover effects
                         | EventMask::BUTTON1_MOTION  // For slider dragging
                 ),
         )?;
