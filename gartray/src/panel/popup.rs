@@ -117,6 +117,8 @@ pub struct PopupPanel {
     press_start: Option<std::time::Instant>,
     /// Which button is being pressed (for hold detection)
     press_button: Option<String>,
+    /// WiFi list scroll offset (number of items scrolled)
+    wifi_scroll_offset: usize,
 }
 
 impl PopupPanel {
@@ -241,6 +243,7 @@ impl PopupPanel {
             base_height: height,
             press_start: None,
             press_button: None,
+            wifi_scroll_offset: 0,
         })
     }
 
@@ -1091,8 +1094,9 @@ impl PopupPanel {
     /// Render WiFi network list, returns height used
     fn render_wifi_list(&mut self, ctx: &CairoContext, start_y: f64) -> Result<f64> {
         const ITEM_HEIGHT: f64 = 32.0;
-        const MAX_ITEMS: usize = 5;
+        const MAX_VISIBLE: usize = 5;
         const PADDING: f64 = 8.0;
+        const SCROLL_INDICATOR_HEIGHT: f64 = 16.0;
 
         self.list_items.clear();
 
@@ -1109,7 +1113,6 @@ impl PopupPanel {
             ctx.set_font_size(12.0);
             ctx.move_to(16.0 + PADDING, start_y + ITEM_HEIGHT / 2.0 + 4.0);
             if is_scanning {
-                // Draw spinner dots animation hint
                 ctx.show_text("Scanning for networks...").ok();
             } else {
                 ctx.show_text("No WiFi networks found").ok();
@@ -1117,8 +1120,33 @@ impl PopupPanel {
             return Ok(ITEM_HEIGHT + PADDING);
         }
 
+        // Clamp scroll offset to valid range
+        let max_scroll = networks.len().saturating_sub(MAX_VISIBLE);
+        if self.wifi_scroll_offset > max_scroll {
+            self.wifi_scroll_offset = max_scroll;
+        }
+
+        let can_scroll_up = self.wifi_scroll_offset > 0;
+        let can_scroll_down = self.wifi_scroll_offset < max_scroll;
+
         let mut y = start_y;
-        for (i, ap) in networks.iter().take(MAX_ITEMS).enumerate() {
+
+        // Scroll up indicator
+        if can_scroll_up {
+            ctx.set_source_rgba(0.5, 0.5, 0.5, 1.0);
+            ctx.set_font_size(10.0);
+            let indicator_text = format!("▲ {} more above", self.wifi_scroll_offset);
+            ctx.move_to(16.0 + PADDING, y + 12.0);
+            ctx.show_text(&indicator_text).ok();
+            y += SCROLL_INDICATOR_HEIGHT;
+        }
+
+        // Render visible networks
+        let visible_networks = networks.iter()
+            .skip(self.wifi_scroll_offset)
+            .take(MAX_VISIBLE);
+
+        for ap in visible_networks {
             let item_y = y;
 
             // Background for connected item
@@ -1187,13 +1215,15 @@ impl PopupPanel {
             y += ITEM_HEIGHT;
         }
 
-        // Show count if more items
-        if networks.len() > MAX_ITEMS {
+        // Scroll down indicator
+        if can_scroll_down {
+            let remaining = networks.len() - self.wifi_scroll_offset - MAX_VISIBLE;
             ctx.set_source_rgba(0.5, 0.5, 0.5, 1.0);
-            ctx.set_font_size(11.0);
+            ctx.set_font_size(10.0);
+            let indicator_text = format!("▼ {} more below", remaining);
             ctx.move_to(16.0 + PADDING, y + 12.0);
-            ctx.show_text(&format!("+{} more networks", networks.len() - MAX_ITEMS)).ok();
-            y += 20.0;
+            ctx.show_text(&indicator_text).ok();
+            y += SCROLL_INDICATOR_HEIGHT;
         }
 
         // Hint for hold-to-toggle
@@ -1397,6 +1427,23 @@ impl PopupPanel {
                         return Ok(true);
                     }
 
+                    // Button 4 = scroll up, Button 5 = scroll down
+                    if e.detail == 4 && self.expanded == ExpandedSection::WiFi {
+                        if self.wifi_scroll_offset > 0 {
+                            self.wifi_scroll_offset -= 1;
+                            self.render()?;
+                        }
+                    } else if e.detail == 5 && self.expanded == ExpandedSection::WiFi {
+                        let network_count = self.network.as_ref()
+                            .map(|n| n.access_points().len())
+                            .unwrap_or(0);
+                        let max_scroll = network_count.saturating_sub(5);
+                        if self.wifi_scroll_offset < max_scroll {
+                            self.wifi_scroll_offset += 1;
+                            self.render()?;
+                        }
+                    }
+
                     // Button 1 = left click, start potential drag or hold
                     if e.detail == 1 {
                         self.handle_button_press(x as f64, y as f64)?;
@@ -1554,6 +1601,7 @@ impl PopupPanel {
                 if self.expanded == ExpandedSection::WiFi {
                     // Collapse
                     self.expanded = ExpandedSection::None;
+                    self.wifi_scroll_offset = 0;
                     info!("WiFi picker collapsed");
                     self.update_panel_height()?;
                 } else {
@@ -1624,6 +1672,7 @@ impl PopupPanel {
             "wifi" => {
                 if self.expanded == ExpandedSection::WiFi {
                     self.expanded = ExpandedSection::None;
+                    self.wifi_scroll_offset = 0;
                     info!("WiFi picker collapsed");
                     self.update_panel_height()?;
                 } else {
