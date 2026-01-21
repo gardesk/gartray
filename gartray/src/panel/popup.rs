@@ -1296,8 +1296,8 @@ impl PopupPanel {
             ctx.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
             ctx.set_font_size(13.0);
             let name_x = if device.connected { 36.0 } else { 24.0 };
-            let name = if device.name.len() > 20 {
-                format!("{}...", &device.name[..18])
+            let name = if device.name.chars().count() > 20 {
+                format!("{}...", device.name.chars().take(18).collect::<String>())
             } else {
                 device.name.clone()
             };
