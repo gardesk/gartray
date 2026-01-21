@@ -1184,8 +1184,8 @@ impl PopupPanel {
             ctx.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
             ctx.set_font_size(13.0);
             let ssid_x = if ap.connected { 36.0 } else { 24.0 };
-            let ssid = if ap.ssid.len() > 20 {
-                format!("{}...", &ap.ssid[..18])
+            let ssid = if ap.ssid.chars().count() > 20 {
+                format!("{}...", ap.ssid.chars().take(18).collect::<String>())
             } else {
                 ap.ssid.clone()
             };
