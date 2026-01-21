@@ -601,7 +601,7 @@ impl PopupPanel {
             let bt_label = if bt_active {
                 self.bluetooth.as_ref()
                     .and_then(|b| b.devices().iter().find(|d| d.connected))
-                    .map(|d| if d.name.len() > 10 { format!("{}...", &d.name[..8]) } else { d.name.clone() })
+                    .map(|d| if d.name.chars().count() > 10 { format!("{}...", d.name.chars().take(8).collect::<String>()) } else { d.name.clone() })
                     .unwrap_or_else(|| "Bluetooth".to_string())
             } else {
                 "BT Off".to_string()
