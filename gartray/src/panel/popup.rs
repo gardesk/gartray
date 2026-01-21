@@ -587,7 +587,7 @@ impl PopupPanel {
             let wifi_label = if wifi_active {
                 self.network.as_ref()
                     .and_then(|n| n.connected_ssid())
-                    .map(|s| if s.len() > 10 { format!("{}...", &s[..8]) } else { s.to_string() })
+                    .map(|s| if s.chars().count() > 10 { format!("{}...", s.chars().take(8).collect::<String>()) } else { s.to_string() })
                     .unwrap_or_else(|| "WiFi".to_string())
             } else {
                 "WiFi Off".to_string()
