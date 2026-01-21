@@ -253,14 +253,9 @@ impl PopupPanel {
             self.surface = None;
         }
 
-        // Refresh network state to show connected network
+        // Just refresh the enabled state (fast, no scan)
         if let Some(ref mut network) = self.network {
-            let _ = network.scan_networks();
-        }
-
-        // Refresh Bluetooth state to show connected devices
-        if let Some(ref mut bluetooth) = self.bluetooth {
-            let _ = bluetooth.scan_devices();
+            let _ = network.update_state();
         }
 
         self.create_window(x, y)?;
@@ -1560,9 +1555,18 @@ impl PopupPanel {
                     // Collapse
                     self.expanded = ExpandedSection::None;
                     info!("WiFi picker collapsed");
+                    self.update_panel_height()?;
                 } else {
-                    // Expand and scan
+                    // Expand - show "Scanning..." first, then scan
                     self.expanded = ExpandedSection::WiFi;
+                    if let Some(ref mut network) = self.network {
+                        network.set_scanning(true);
+                    }
+                    self.update_panel_height()?;
+                    self.render()?;
+                    self.conn.flush()?;
+
+                    // Now do the blocking scan
                     if let Some(ref mut network) = self.network {
                         if let Err(e) = network.scan_networks() {
                             debug!("WiFi scan failed: {}", e);
@@ -1571,9 +1575,8 @@ impl PopupPanel {
                             info!("WiFi picker expanded, {} networks", aps.len());
                         }
                     }
+                    self.update_panel_height()?;
                 }
-                // Recalculate height and resize window
-                self.update_panel_height()?;
             }
             // Bluetooth - toggle expansion or scan
             "bluetooth" => {
