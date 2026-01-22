@@ -26,86 +26,93 @@ impl PowerModule {
         Ok(())
     }
 
-    /// Shutdown the system
+    /// Shutdown the system via D-Bus (with systemctl fallback)
     pub fn shutdown(&self) -> Result<()> {
         info!("Initiating system shutdown");
-        // Use loginctl which handles polkit properly
-        self.run_command("loginctl", &["poweroff"])
+        self.call_login1("PowerOff", true)
+            .or_else(|e| {
+                warn!("D-Bus PowerOff failed: {}, trying systemctl", e);
+                Self::run_systemctl("poweroff")
+            })
     }
 
-    /// Reboot the system
+    /// Reboot the system via D-Bus (with systemctl fallback)
     pub fn reboot(&self) -> Result<()> {
         info!("Initiating system reboot");
-        self.run_command("loginctl", &["reboot"])
+        self.call_login1("Reboot", true)
+            .or_else(|e| {
+                warn!("D-Bus Reboot failed: {}, trying systemctl", e);
+                Self::run_systemctl("reboot")
+            })
     }
 
-    /// Suspend the system
+    /// Suspend the system via D-Bus (with systemctl fallback)
     pub fn suspend(&self) -> Result<()> {
         info!("Initiating system suspend");
-        self.run_command("loginctl", &["suspend"])
+        self.call_login1("Suspend", true)
+            .or_else(|e| {
+                warn!("D-Bus Suspend failed: {}, trying systemctl", e);
+                Self::run_systemctl("suspend")
+            })
     }
 
-    /// Hibernate the system (uses suspend as fallback)
+    /// Hibernate the system via D-Bus (with systemctl fallback)
     pub fn hibernate(&self) -> Result<()> {
-        info!("Initiating system suspend");
-        self.run_command("loginctl", &["suspend"])
+        info!("Initiating system hibernate");
+        self.call_login1("Hibernate", true)
+            .or_else(|e| {
+                warn!("D-Bus Hibernate failed: {}, trying suspend", e);
+                self.suspend()
+            })
     }
 
     /// Logout current session
     pub fn logout(&self) -> Result<()> {
         info!("Initiating session logout");
-        // Try multiple approaches for logout
+
+        // Try D-Bus TerminateSession first
+        if let Some(ref conn) = self.conn {
+            // Get session ID from environment or use "self"
+            let session_id = std::env::var("XDG_SESSION_ID")
+                .unwrap_or_else(|_| "self".to_string());
+
+            let result: Result<(), zbus::Error> = conn.call_method(
+                Some("org.freedesktop.login1"),
+                "/org/freedesktop/login1",
+                Some("org.freedesktop.login1.Manager"),
+                "TerminateSession",
+                &(session_id.as_str(),),
+            ).map(|_: zbus::Message| ());
+
+            if result.is_ok() {
+                return Ok(());
+            }
+            warn!("D-Bus TerminateSession failed: {:?}", result);
+        }
+
+        // Fallback: kill the window manager
         use std::process::Command;
-
-        // First try: loginctl terminate-session self
-        if let Ok(status) = Command::new("loginctl")
-            .args(["terminate-session", "self"])
-            .status()
-        {
+        if let Ok(status) = Command::new("pkill").args(["-TERM", "-x", "gar"]).status() {
             if status.success() {
                 return Ok(());
-            }
-        }
-
-        // Second try: kill the window manager (gar)
-        if let Ok(status) = Command::new("pkill")
-            .args(["-TERM", "-x", "gar"])
-            .status()
-        {
-            if status.success() {
-                return Ok(());
-            }
-        }
-
-        // Third try: send SIGTERM to the X session leader
-        if let Ok(output) = Command::new("loginctl")
-            .args(["show-session", "self", "-p", "Leader", "--value"])
-            .output()
-        {
-            if output.status.success() {
-                let pid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !pid.is_empty() {
-                    let _ = Command::new("kill").args(["-TERM", &pid]).status();
-                    return Ok(());
-                }
             }
         }
 
         anyhow::bail!("Failed to logout")
     }
 
-    /// Run a command and return result
-    fn run_command(&self, cmd: &str, args: &[&str]) -> Result<()> {
+    /// Run systemctl command as fallback
+    fn run_systemctl(action: &str) -> Result<()> {
         use std::process::Command;
-        let status = Command::new(cmd)
-            .args(args)
+        let status = Command::new("systemctl")
+            .arg(action)
             .status()
-            .context(format!("Failed to run {} {:?}", cmd, args))?;
+            .context(format!("Failed to run systemctl {}", action))?;
 
         if status.success() {
             Ok(())
         } else {
-            anyhow::bail!("{} {:?} failed with exit code {:?}", cmd, args, status.code())
+            anyhow::bail!("systemctl {} failed", action)
         }
     }
 
