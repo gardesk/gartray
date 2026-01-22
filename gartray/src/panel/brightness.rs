@@ -163,4 +163,14 @@ impl BrightnessModule {
     pub fn is_available(&self) -> bool {
         self.device_path.is_some()
     }
+
+    /// Get max brightness value
+    pub fn max_brightness(&self) -> u32 {
+        self.max_brightness
+    }
+
+    /// Get device path
+    pub fn device_path(&self) -> Option<&PathBuf> {
+        self.device_path.as_ref()
+    }
 }
