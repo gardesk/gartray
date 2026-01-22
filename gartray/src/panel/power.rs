@@ -29,76 +29,83 @@ impl PowerModule {
     /// Shutdown the system
     pub fn shutdown(&self) -> Result<()> {
         info!("Initiating system shutdown");
-        self.call_login1("PowerOff", true)
+        // Use loginctl which handles polkit properly
+        self.run_command("loginctl", &["poweroff"])
     }
 
     /// Reboot the system
     pub fn reboot(&self) -> Result<()> {
         info!("Initiating system reboot");
-        self.call_login1("Reboot", true)
+        self.run_command("loginctl", &["reboot"])
     }
 
     /// Suspend the system
     pub fn suspend(&self) -> Result<()> {
         info!("Initiating system suspend");
-        self.call_login1("Suspend", true)
+        self.run_command("loginctl", &["suspend"])
     }
 
-    /// Hibernate the system
+    /// Hibernate the system (uses suspend as fallback)
     pub fn hibernate(&self) -> Result<()> {
-        info!("Initiating system hibernate");
-        self.call_login1("Hibernate", true)
+        info!("Initiating system suspend");
+        self.run_command("loginctl", &["suspend"])
     }
 
     /// Logout current session
     pub fn logout(&self) -> Result<()> {
         info!("Initiating session logout");
-        // For logout, we terminate the current session
-        // This requires getting the current session ID first
-        if let Some(ref conn) = self.conn {
-            // Get current session
-            let session_id = std::env::var("XDG_SESSION_ID")
-                .unwrap_or_else(|_| "auto".to_string());
+        // Try multiple approaches for logout
+        use std::process::Command;
 
-            let proxy = zbus::blocking::fdo::DBusProxy::new(conn)?;
+        // First try: loginctl terminate-session self
+        if let Ok(status) = Command::new("loginctl")
+            .args(["terminate-session", "self"])
+            .status()
+        {
+            if status.success() {
+                return Ok(());
+            }
+        }
 
-            // Call TerminateSession on login1.Manager
-            let result: Result<(), zbus::Error> = conn.call_method(
-                Some("org.freedesktop.login1"),
-                "/org/freedesktop/login1",
-                Some("org.freedesktop.login1.Manager"),
-                "TerminateSession",
-                &(session_id,),
-            ).map(|_: zbus::Message| ());
+        // Second try: kill the window manager (gar)
+        if let Ok(status) = Command::new("pkill")
+            .args(["-TERM", "-x", "gar"])
+            .status()
+        {
+            if status.success() {
+                return Ok(());
+            }
+        }
 
-            match result {
-                Ok(_) => {
-                    info!("Logout initiated");
-                    Ok(())
-                }
-                Err(e) => {
-                    warn!("Failed to logout via D-Bus: {}", e);
-                    // Fallback: try loginctl
-                    self.logout_fallback()
+        // Third try: send SIGTERM to the X session leader
+        if let Ok(output) = Command::new("loginctl")
+            .args(["show-session", "self", "-p", "Leader", "--value"])
+            .output()
+        {
+            if output.status.success() {
+                let pid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !pid.is_empty() {
+                    let _ = Command::new("kill").args(["-TERM", &pid]).status();
+                    return Ok(());
                 }
             }
-        } else {
-            self.logout_fallback()
         }
+
+        anyhow::bail!("Failed to logout")
     }
 
-    /// Fallback logout using loginctl command
-    fn logout_fallback(&self) -> Result<()> {
+    /// Run a command and return result
+    fn run_command(&self, cmd: &str, args: &[&str]) -> Result<()> {
         use std::process::Command;
-        let status = Command::new("loginctl")
-            .args(["terminate-session", ""])
+        let status = Command::new(cmd)
+            .args(args)
             .status()
-            .context("Failed to run loginctl")?;
+            .context(format!("Failed to run {} {:?}", cmd, args))?;
 
         if status.success() {
             Ok(())
         } else {
-            anyhow::bail!("loginctl terminate-session failed")
+            anyhow::bail!("{} {:?} failed with exit code {:?}", cmd, args, status.code())
         }
     }
 
