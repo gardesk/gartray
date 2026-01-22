@@ -119,6 +119,10 @@ pub struct PopupPanel {
     press_button: Option<String>,
     /// WiFi list scroll offset (number of items scrolled)
     wifi_scroll_offset: usize,
+    /// Last time slider value was applied (for throttling wpctl calls)
+    last_slider_apply: Option<std::time::Instant>,
+    /// Last time we rendered (for 60fps cap during drag)
+    last_render: Option<std::time::Instant>,
 }
 
 impl PopupPanel {
@@ -244,6 +248,8 @@ impl PopupPanel {
             press_start: None,
             press_button: None,
             wifi_scroll_offset: 0,
+            last_slider_apply: None,
+            last_render: None,
         })
     }
 
@@ -651,7 +657,7 @@ impl PopupPanel {
 
             // Shutdown
             let shutdown_x = 16.0;
-            self.draw_toggle_button(&ctx, "Shut", "power", false, is_hovered("shutdown"), shutdown_x, power_y, power_btn_width, power_btn_height)?;
+            self.draw_toggle_button(&ctx, "Shutdown", "power", false, is_hovered("shutdown"), shutdown_x, power_y, power_btn_width, power_btn_height)?;
             self.toggle_buttons.push(ToggleButton {
                 name: "shutdown".to_string(), x: shutdown_x, y: power_y, width: power_btn_width, height: power_btn_height, active: false,
             });
@@ -1487,6 +1493,8 @@ impl PopupPanel {
                         // End drag - apply the final value
                         if let Some(ref module_name) = self.dragging.take() {
                             self.apply_slider_value(module_name, self.drag_value)?;
+                            self.last_slider_apply = None; // Reset throttle state
+                            self.last_render = None;
                         }
                     }
                 }
@@ -1846,14 +1854,54 @@ impl PopupPanel {
         Ok(())
     }
 
-    /// Handle drag motion - update visual only (no PulseAudio calls)
+    /// Handle drag motion - update visual at 60fps, apply values less frequently
     fn handle_drag(&mut self, x: f64, _y: f64) -> Result<()> {
         if let Some(ref module_name) = self.dragging.clone() {
             // Find the row for this module
             if let Some(row) = self.slider_rows.iter().find(|r| r.name == *module_name) {
-                // Only update drag_value, don't call PulseAudio
+                // Always update drag_value for smooth visual tracking
                 self.drag_value = ((x - row.slider_x) / row.slider_width).clamp(0.0, 1.0);
-                self.render()?;
+
+                let now = std::time::Instant::now();
+
+                // Throttle value application to 100ms (10 updates/sec for wpctl)
+                let should_apply = self.last_slider_apply
+                    .map(|last| now.duration_since(last).as_millis() >= 100)
+                    .unwrap_or(true);
+
+                if should_apply {
+                    let value = self.drag_value;
+                    match module_name.as_str() {
+                        "brightness" => {
+                            // Brightness via sysfs - fast, apply directly
+                            if let Some(ref mut bright) = self.brightness {
+                                let _ = bright.set_brightness(value);
+                            }
+                        }
+                        "volume" => {
+                            // Volume via wpctl - spawn fire-and-forget
+                            use std::process::{Command, Stdio};
+                            let _ = Command::new("wpctl")
+                                .args(["set-volume", "@DEFAULT_AUDIO_SINK@", &format!("{:.2}", value)])
+                                .stdin(Stdio::null())
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
+                                .spawn();
+                        }
+                        _ => {}
+                    }
+                    self.last_slider_apply = Some(now);
+                }
+
+                // Throttle rendering to ~60fps (16ms) for smooth visuals without excessive redraws
+                let should_render = self.last_render
+                    .map(|last| now.duration_since(last).as_millis() >= 16)
+                    .unwrap_or(true);
+
+                if should_render {
+                    self.render()?;
+                    self.last_render = Some(now);
+                }
             }
         }
         Ok(())
