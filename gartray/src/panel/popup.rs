@@ -1216,7 +1216,7 @@ impl PopupPanel {
         if can_scroll_up {
             ctx.set_source_rgba(0.5, 0.5, 0.5, 1.0);
             ctx.set_font_size(10.0);
-            let indicator_text = format!("▲ {} more above", self.wifi_scroll_offset);
+            let indicator_text = format!("^ {} more above", self.wifi_scroll_offset);
             ctx.move_to(16.0 + PADDING, y + 12.0);
             ctx.show_text(&indicator_text).ok();
             y += SCROLL_INDICATOR_HEIGHT;
@@ -1303,7 +1303,7 @@ impl PopupPanel {
             let remaining = networks.len() - self.wifi_scroll_offset - MAX_VISIBLE;
             ctx.set_source_rgba(0.5, 0.5, 0.5, 1.0);
             ctx.set_font_size(10.0);
-            let indicator_text = format!("▼ {} more below", remaining);
+            let indicator_text = format!("v {} more below", remaining);
             ctx.move_to(16.0 + PADDING, y + 12.0);
             ctx.show_text(&indicator_text).ok();
             y += SCROLL_INDICATOR_HEIGHT;
@@ -1418,7 +1418,7 @@ impl PopupPanel {
         if can_scroll_up {
             ctx.set_source_rgba(0.5, 0.5, 0.5, 1.0);
             ctx.set_font_size(10.0);
-            let indicator_text = format!("▲ {} more above", self.bluetooth_scroll_offset);
+            let indicator_text = format!("^ {} more above", self.bluetooth_scroll_offset);
             ctx.move_to(16.0 + PADDING, y + 12.0);
             ctx.show_text(&indicator_text).ok();
             y += SCROLL_INDICATOR_HEIGHT;
@@ -1487,7 +1487,7 @@ impl PopupPanel {
             let remaining = devices.len() - self.bluetooth_scroll_offset - MAX_VISIBLE;
             ctx.set_source_rgba(0.5, 0.5, 0.5, 1.0);
             ctx.set_font_size(10.0);
-            let indicator_text = format!("▼ {} more below", remaining);
+            let indicator_text = format!("v {} more below", remaining);
             ctx.move_to(16.0 + PADDING, y + 12.0);
             ctx.show_text(&indicator_text).ok();
             y += SCROLL_INDICATOR_HEIGHT;
@@ -1668,9 +1668,42 @@ impl PopupPanel {
                 }
                 x11rb::protocol::Event::FocusOut(e) => {
                     if self.window.as_ref().map(|w| w.id()) == Some(e.event) {
-                        debug!("Panel lost focus, hiding");
-                        self.hide()?;
-                        return Ok(true);
+                        use x11rb::protocol::xproto::NotifyMode;
+                        if e.mode == NotifyMode::NORMAL {
+                            debug!("Panel lost focus (normal), hiding");
+                            self.hide()?;
+                            return Ok(true);
+                        } else if e.mode == NotifyMode::GRAB {
+                            // Another app is grabbing (e.g., garshot for screenshot)
+                            // Release our pointer grab so they can use it
+                            debug!("Focus lost to grab, releasing pointer");
+                            let _ = self.conn.inner().ungrab_pointer(CURRENT_TIME);
+                            self.conn.flush()?;
+                        } else {
+                            debug!("Panel focus event mode={:?}, ignoring", e.mode);
+                        }
+                    }
+                }
+                x11rb::protocol::Event::FocusIn(e) => {
+                    if self.window.as_ref().map(|w| w.id()) == Some(e.event) {
+                        use x11rb::protocol::xproto::NotifyMode;
+                        if e.mode == NotifyMode::UNGRAB {
+                            // Grab ended, re-grab pointer for click-outside detection
+                            debug!("Focus returned after ungrab, re-grabbing pointer");
+                            if let Some(ref window) = self.window {
+                                let _ = self.conn.inner().grab_pointer(
+                                    false,
+                                    window.id(),
+                                    EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
+                                    GrabMode::ASYNC,
+                                    GrabMode::ASYNC,
+                                    x11rb::NONE,
+                                    x11rb::NONE,
+                                    CURRENT_TIME,
+                                );
+                                self.conn.flush()?;
+                            }
+                        }
                     }
                 }
                 x11rb::protocol::Event::KeyPress(e) => {
