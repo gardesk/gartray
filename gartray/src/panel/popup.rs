@@ -131,6 +131,8 @@ pub struct PopupPanel {
     last_render: Option<std::time::Instant>,
     /// Last time WiFi networks were scanned (for periodic refresh)
     last_wifi_scan: Option<std::time::Instant>,
+    /// Previously focused window (to restore on hide)
+    previous_focus: Option<u32>,
 }
 
 impl PopupPanel {
@@ -262,6 +264,7 @@ impl PopupPanel {
             last_slider_apply: None,
             last_render: None,
             last_wifi_scan: None,
+            previous_focus: None,
         })
     }
 
@@ -285,6 +288,14 @@ impl PopupPanel {
             window.map()?;
             self.conn.flush()?;
             info!("Panel window {} mapped at ({}, {})", window.id(), self.pos_x, self.pos_y);
+
+            // Save current focus before taking it
+            if let Ok(focus_reply) = self.conn.inner().get_input_focus()?.reply() {
+                if focus_reply.focus != x11rb::NONE && focus_reply.focus != window.id() {
+                    self.previous_focus = Some(focus_reply.focus);
+                    debug!("Saved previous focus: {}", focus_reply.focus);
+                }
+            }
 
             // Set input focus so we receive keyboard events
             self.conn.inner().set_input_focus(
@@ -343,6 +354,17 @@ impl PopupPanel {
 
         if let Some(ref window) = self.window {
             window.unmap()?;
+            self.conn.flush()?;
+        }
+
+        // Restore focus to previous window
+        if let Some(prev_focus) = self.previous_focus.take() {
+            debug!("Restoring focus to window {}", prev_focus);
+            let _ = self.conn.inner().set_input_focus(
+                x11rb::protocol::xproto::InputFocus::PARENT,
+                prev_focus,
+                CURRENT_TIME,
+            );
             self.conn.flush()?;
         }
 
