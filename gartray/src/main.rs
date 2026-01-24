@@ -1,8 +1,9 @@
-//! gartray - System tray and quick settings panel
+//! gartray - Quick settings panel for gar desktop
 //!
-//! A modern system tray supporting both XEMBED and StatusNotifierItem protocols,
-//! with an integrated quick settings panel for volume, brightness, network,
+//! A quick settings panel for volume, brightness, network,
 //! bluetooth, battery, and power controls.
+//!
+//! Note: System tray functionality has been moved to garbar.
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -13,13 +14,12 @@ mod config;
 mod daemon;
 mod ipc;
 mod panel;
-mod tray;
 mod ui;
 
-/// gartray - System tray and quick settings panel for gar desktop
+/// gartray - Quick settings panel for gar desktop
 #[derive(Parser)]
 #[command(name = "gartray")]
-#[command(about = "System tray and quick settings panel", long_about = None)]
+#[command(about = "Quick settings panel for gar desktop", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -35,7 +35,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the tray daemon
+    /// Start the panel daemon
     Daemon {
         /// Run in foreground
         #[arg(short, long)]

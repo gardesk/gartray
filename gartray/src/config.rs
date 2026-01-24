@@ -8,7 +8,6 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    pub tray: TrayConfig,
     pub panel: PanelConfig,
     pub theme: ThemeConfig,
 }
@@ -16,49 +15,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            tray: TrayConfig::default(),
             panel: PanelConfig::default(),
             theme: ThemeConfig::default(),
-        }
-    }
-}
-
-/// Tray configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct TrayConfig {
-    /// Whether the XEmbed system tray is enabled (for legacy tray icons)
-    pub enabled: bool,
-    /// Tray position: top-left, top-right, bottom-left, bottom-right
-    pub position: String,
-    /// Icon size in pixels
-    pub icon_size: u32,
-    /// Spacing between icons
-    pub spacing: f64,
-    /// Background color
-    pub background: String,
-    /// Window opacity
-    pub opacity: f64,
-    /// X offset from edge (positive = inward)
-    pub offset_x: i32,
-    /// Y offset from edge (positive = inward)
-    pub offset_y: i32,
-    /// Monitor to show on: "primary", "all", or monitor name (e.g., "HDMI-0")
-    pub monitor: String,
-}
-
-impl Default for TrayConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            position: "top-right".to_string(),
-            icon_size: 22,
-            spacing: 8.0,
-            background: "#1a1a1a".to_string(),
-            opacity: 0.95,
-            offset_x: 8,
-            offset_y: 8,
-            monitor: "primary".to_string(),
         }
     }
 }

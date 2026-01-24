@@ -1,21 +1,16 @@
-//! Daemon state machine and main event loop
+//! Daemon state machine and main event loop for quick settings panel
 
 use anyhow::{Context, Result};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
-use std::sync::{Arc, Mutex};
 use tokio::signal::unix::{signal, SignalKind};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::{self, Config};
 use crate::ipc::{Command, IpcServer};
 use crate::panel::PopupPanel;
-use crate::tray::renderer::TrayRenderer;
-use crate::tray::sni::{watcher, StatusNotifierHost};
-use crate::tray::sni::watcher::WatcherState;
-use crate::tray::xembed::XEmbedManager;
 
 /// Get the path to the PID file
 fn pid_file_path() -> PathBuf {
@@ -92,17 +87,8 @@ impl Drop for PidGuard {
 /// Daemon state
 pub struct Daemon {
     config: Config,
-    xembed: Option<XEmbedManager>,
     ipc_server: IpcServer,
     ipc_rx: Receiver<Command>,
-    /// D-Bus connection for SNI
-    dbus_conn: Option<zbus::Connection>,
-    /// SNI watcher state
-    sni_watcher_state: Option<Arc<Mutex<WatcherState>>>,
-    /// SNI host
-    sni_host: Option<StatusNotifierHost>,
-    /// Tray renderer for SNI icons
-    tray_renderer: TrayRenderer,
     /// Quick settings popup panel
     panel: Option<PopupPanel>,
     running: bool,
@@ -112,7 +98,6 @@ impl Daemon {
     /// Create a new daemon
     pub fn new(config: Config) -> Result<Self> {
         let (ipc_server, ipc_rx) = IpcServer::new();
-        let tray_renderer = TrayRenderer::new(&config.tray);
 
         // Create popup panel if enabled
         let panel = if config.panel.enabled {
@@ -132,13 +117,8 @@ impl Daemon {
 
         Ok(Self {
             config,
-            xembed: None,
             ipc_server,
             ipc_rx,
-            dbus_conn: None,
-            sni_watcher_state: None,
-            sni_host: None,
-            tray_renderer,
             panel,
             running: true,
         })
@@ -148,67 +128,6 @@ impl Daemon {
     pub fn init_ipc(&mut self) -> Result<()> {
         self.ipc_server.start().context("Failed to start IPC server")?;
         info!("IPC server started");
-        Ok(())
-    }
-
-    /// Initialize D-Bus and SNI support
-    pub async fn init_dbus(&mut self) -> Result<()> {
-        info!("Initializing D-Bus connection...");
-
-        // Connect to session bus
-        let conn = zbus::Connection::session()
-            .await
-            .context("Failed to connect to session D-Bus")?;
-
-        info!("Connected to D-Bus session bus");
-
-        // Start the StatusNotifierWatcher service
-        match watcher::start_watcher(&conn).await {
-            Ok(state) => {
-                self.sni_watcher_state = Some(state.clone());
-                info!("StatusNotifierWatcher service started");
-
-                // Create and register the host
-                let mut host = StatusNotifierHost::new(conn.clone(), state)
-                    .await
-                    .context("Failed to create SNI host")?;
-
-                host.register().await?;
-
-                // Query existing items
-                if let Err(e) = host.query_existing_items().await {
-                    warn!("Failed to query existing SNI items: {}", e);
-                }
-
-                self.sni_host = Some(host);
-            }
-            Err(e) => {
-                // Another watcher might be running (e.g., KDE's)
-                warn!("Failed to start StatusNotifierWatcher: {} (another tray may be running)", e);
-            }
-        }
-
-        self.dbus_conn = Some(conn);
-        Ok(())
-    }
-
-    /// Initialize X11 and tray
-    pub fn init_x11(&mut self) -> Result<()> {
-        info!("Initializing X11 connection...");
-
-        if self.config.tray.enabled {
-            let mut xembed = XEmbedManager::new(&self.config.tray)?;
-
-            if xembed.acquire_selection() {
-                info!("Acquired system tray selection");
-                self.xembed = Some(xembed);
-            } else {
-                warn!("Failed to acquire tray selection (another tray running?)");
-            }
-        } else {
-            info!("XEmbed system tray disabled in config");
-        }
-
         Ok(())
     }
 
@@ -236,7 +155,7 @@ impl Daemon {
                     info!("Received Ctrl+C, shutting down");
                     self.running = false;
                 }
-                _ = self.poll_x11_events() => {
+                _ = self.poll_panel_events() => {
                     // Events processed
                 }
             }
@@ -287,13 +206,9 @@ impl Daemon {
                 let _ = self.handle_reload();
             }
             Command::Status => {
-                let xembed_count = self.xembed.as_ref().map(|x| x.icon_count()).unwrap_or(0);
-                let sni_count = self.sni_host.as_ref().map(|h| h.item_count()).unwrap_or(0);
                 let panel_visible = self.panel.as_ref().map(|p| p.is_visible()).unwrap_or(false);
                 info!(
-                    "Status: running, {} XEMBED icons, {} SNI items, panel {}",
-                    xembed_count,
-                    sni_count,
+                    "Status: running, panel {}",
                     if panel_visible { "visible" } else { "hidden" }
                 );
             }
@@ -304,30 +219,8 @@ impl Daemon {
         }
     }
 
-    /// Poll X11 events and render tray
-    async fn poll_x11_events(&mut self) -> Result<()> {
-        if let Some(ref mut xembed) = self.xembed {
-            xembed.process_events()?;
-
-            // Render SNI icons if we have any
-            if let Some(ref sni_host) = self.sni_host {
-                let sni_items: Vec<_> = sni_host.items().collect();
-                if !sni_items.is_empty() {
-                    // Get XEMBED icon count for offset
-                    let xembed_offset = xembed.icon_count() as i32
-                        * (self.config.tray.icon_size as i32 + self.config.tray.spacing as i32);
-
-                    if let Err(e) = self.tray_renderer.render_sni_icons(
-                        xembed.tray_window(),
-                        &sni_items,
-                        xembed_offset,
-                    ) {
-                        warn!("Failed to render SNI icons: {}", e);
-                    }
-                }
-            }
-        }
-
+    /// Poll panel events
+    async fn poll_panel_events(&mut self) -> Result<()> {
         // Process panel events
         if let Some(ref mut panel) = self.panel {
             if let Err(e) = panel.process_events() {
@@ -355,7 +248,7 @@ impl Daemon {
     }
 }
 
-/// Run the tray daemon
+/// Run the panel daemon
 pub async fn run(config_path: Option<String>, _foreground: bool) -> Result<()> {
     check_existing_daemon()?;
     write_pid_file()?;
@@ -363,12 +256,10 @@ pub async fn run(config_path: Option<String>, _foreground: bool) -> Result<()> {
 
     let config = config::load(config_path.as_deref())?;
     info!("Loaded configuration");
-    info!("Tray position: {}", config.tray.position);
-    info!("Icon size: {}px", config.tray.icon_size);
+    info!("Panel width: {}px", config.panel.width);
+    info!("Enabled modules: {:?}", config.panel.modules);
 
     let mut daemon = Daemon::new(config)?;
     daemon.init_ipc().context("Failed to initialize IPC")?;
-    daemon.init_dbus().await.context("Failed to initialize D-Bus")?;
-    daemon.init_x11().context("Failed to initialize X11")?;
     daemon.run().await
 }
