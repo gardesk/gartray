@@ -363,24 +363,37 @@ impl PopupPanel {
     /// Calculate and update panel height based on expanded section
     fn update_panel_height(&mut self) -> Result<()> {
         const LIST_ITEM_HEIGHT: u32 = 32;
-        const MAX_VISIBLE_ITEMS: u32 = 5;
+        const WIFI_MAX_VISIBLE: u32 = 3;
+        const BLUETOOTH_MAX_VISIBLE: u32 = 5;
+        const SCROLL_INDICATOR_HEIGHT: u32 = 16;
+        const HINT_HEIGHT: u32 = 20;
+        const PADDING: u32 = 8;
 
         let expansion_height = match self.expanded {
             ExpandedSection::None => 0,
             ExpandedSection::WiFi => {
                 let item_count = self.network.as_ref()
-                    .map(|n| n.access_points().len().min(MAX_VISIBLE_ITEMS as usize))
+                    .map(|n| n.access_points().len())
                     .unwrap_or(0) as u32;
                 // At least show space for "No networks" message
-                let items = item_count.max(1);
-                items * LIST_ITEM_HEIGHT + 16 // 16px padding
+                let visible_items = item_count.min(WIFI_MAX_VISIBLE).max(1);
+                let mut height = visible_items * LIST_ITEM_HEIGHT;
+                // Add space for scroll indicators if list is scrollable
+                if item_count > WIFI_MAX_VISIBLE {
+                    height += SCROLL_INDICATOR_HEIGHT * 2; // up + down indicators
+                }
+                height + HINT_HEIGHT + PADDING
             }
             ExpandedSection::Bluetooth => {
                 let item_count = self.bluetooth.as_ref()
-                    .map(|b| b.devices().len().min(MAX_VISIBLE_ITEMS as usize))
+                    .map(|b| b.devices().len())
                     .unwrap_or(0) as u32;
-                let items = item_count.max(1);
-                items * LIST_ITEM_HEIGHT + 16
+                let visible_items = item_count.min(BLUETOOTH_MAX_VISIBLE).max(1);
+                let mut height = visible_items * LIST_ITEM_HEIGHT;
+                if item_count > BLUETOOTH_MAX_VISIBLE {
+                    height += SCROLL_INDICATOR_HEIGHT * 2;
+                }
+                height + PADDING
             }
         };
 
@@ -1135,7 +1148,7 @@ impl PopupPanel {
     /// Render WiFi network list, returns height used
     fn render_wifi_list(&mut self, ctx: &CairoContext, start_y: f64) -> Result<f64> {
         const ITEM_HEIGHT: f64 = 32.0;
-        const MAX_VISIBLE: usize = 5;
+        const MAX_VISIBLE: usize = 3;
         const PADDING: f64 = 8.0;
         const SCROLL_INDICATOR_HEIGHT: f64 = 16.0;
 
@@ -1727,7 +1740,7 @@ impl PopupPanel {
                                 let network_count = self.network.as_ref()
                                     .map(|n| n.access_points().len())
                                     .unwrap_or(0);
-                                let max_scroll = network_count.saturating_sub(5);
+                                let max_scroll = network_count.saturating_sub(3); // MAX_VISIBLE = 3
                                 if self.wifi_scroll_offset < max_scroll {
                                     self.wifi_scroll_offset += 1;
                                     self.render()?;
@@ -1737,7 +1750,7 @@ impl PopupPanel {
                                 let device_count = self.bluetooth.as_ref()
                                     .map(|b| b.devices().len())
                                     .unwrap_or(0);
-                                let max_scroll = device_count.saturating_sub(5);
+                                let max_scroll = device_count.saturating_sub(5); // MAX_VISIBLE = 5
                                 if self.bluetooth_scroll_offset < max_scroll {
                                     self.bluetooth_scroll_offset += 1;
                                     self.render()?;
