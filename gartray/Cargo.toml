@@ -46,3 +46,8 @@ thiserror = { workspace = true }
 # Utilities
 dirs = { workspace = true }
 shellexpand = { workspace = true }
+
+# Icon loading
+image = { workspace = true }
+resvg = { workspace = true }
+tiny-skia = { workspace = true }
