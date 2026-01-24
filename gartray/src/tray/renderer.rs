@@ -6,12 +6,39 @@
 use anyhow::Result;
 use cairo::{Context, Format, ImageSurface};
 use gartk_x11::Window;
+use std::collections::HashMap;
 use tracing::{debug, warn};
 use x11rb::protocol::xproto::ConnectionExt;
 
-use super::icons::{IconData, argb_to_bgra};
+use super::icons::{IconData, argb_to_cairo_bgra};
 use super::sni::SniItem;
 use crate::config::TrayConfig;
+
+/// Cached icon data (BGRA, ready for Cairo)
+#[derive(Clone)]
+struct CachedIcon {
+    width: i32,
+    height: i32,
+    data: Vec<u8>,
+}
+
+/// Info about where an SNI icon was rendered (for hit testing)
+#[derive(Debug, Clone)]
+pub struct SniIconPosition {
+    pub id: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+/// Result of a hit test
+#[derive(Debug, Clone)]
+pub struct SniHitResult {
+    pub id: String,
+    pub local_x: i32,
+    pub local_y: i32,
+}
 
 /// Renders tray icons (both XEMBED positioning and SNI drawing)
 pub struct TrayRenderer {
@@ -27,6 +54,10 @@ pub struct TrayRenderer {
     spacing: u32,
     /// Background color (ARGB)
     background: u32,
+    /// Icon cache by name/id
+    icon_cache: HashMap<String, CachedIcon>,
+    /// Positions of rendered SNI icons (for hit testing)
+    sni_positions: Vec<SniIconPosition>,
 }
 
 impl TrayRenderer {
@@ -40,7 +71,36 @@ impl TrayRenderer {
             icon_size: config.icon_size,
             spacing: config.spacing as u32,
             background: bg,
+            icon_cache: HashMap::new(),
+            sni_positions: Vec::new(),
         }
+    }
+
+    /// Clear the icon cache (e.g., on theme change)
+    pub fn clear_cache(&mut self) {
+        self.icon_cache.clear();
+        debug!("Icon cache cleared");
+    }
+
+    /// Hit test a point against rendered SNI icons
+    /// Returns the icon ID and local coordinates if hit
+    pub fn hit_test(&self, x: i32, y: i32) -> Option<SniHitResult> {
+        for pos in &self.sni_positions {
+            if x >= pos.x && x < pos.x + pos.width &&
+               y >= pos.y && y < pos.y + pos.height {
+                return Some(SniHitResult {
+                    id: pos.id.clone(),
+                    local_x: x - pos.x,
+                    local_y: y - pos.y,
+                });
+            }
+        }
+        None
+    }
+
+    /// Get the icon size
+    pub fn icon_size(&self) -> u32 {
+        self.icon_size
     }
 
     /// Ensure surface is allocated with correct size
@@ -74,7 +134,7 @@ impl TrayRenderer {
     }
 
     /// Draw an SNI icon at position
-    fn draw_sni_icon(&self, item: &SniItem, x: i32, y: i32) -> Result<()> {
+    fn draw_sni_icon(&mut self, item: &SniItem, x: i32, y: i32) -> Result<()> {
         let surface = self.surface.as_ref()
             .ok_or_else(|| anyhow::anyhow!("No surface"))?;
 
@@ -88,42 +148,93 @@ impl TrayRenderer {
 
         match icon_data {
             IconData::Pixmap { width, height, data } => {
-                // Convert ARGB to Cairo's BGRA format
-                let bgra = argb_to_bgra(&data);
-
-                if let Ok(icon_surface) = ImageSurface::create_for_data(
-                    bgra.into_boxed_slice(),
-                    Format::ARgb32,
-                    width,
-                    height,
-                    width * 4,
-                ) {
-                    // Scale to icon_size
-                    let scale = self.icon_size as f64 / width.max(height) as f64;
-                    ctx.save().ok();
-                    ctx.translate(x as f64, y as f64);
-                    ctx.scale(scale, scale);
-                    ctx.set_source_surface(&icon_surface, 0.0, 0.0).ok();
-                    ctx.paint().ok();
-                    ctx.restore().ok();
-                }
+                // Convert ARGB to Cairo's BGRA format with premultiplied alpha
+                let bgra = argb_to_cairo_bgra(&data);
+                self.draw_pixmap_data(&ctx, x, y, width, height, &bgra)?;
             }
-            IconData::ThemeName(name) => {
-                // Try to find icon in theme
-                if let Some(path) = IconData::find_theme_icon(&name, self.icon_size) {
-                    // Load PNG/SVG and draw
-                    // For now, draw a placeholder with the first letter
-                    self.draw_placeholder(&ctx, x, y, &name);
+            IconData::ThemeName(ref name) => {
+                // Check cache first
+                if let Some(cached) = self.icon_cache.get(name) {
+                    self.draw_pixmap_data(&ctx, x, y, cached.width, cached.height, &cached.data)?;
+                } else if let Some(path) = IconData::find_theme_icon(name, self.icon_size) {
+                    // Load from file and cache
+                    match IconData::load_from_file(&path, self.icon_size) {
+                        Ok(IconData::Pixmap { width, height, data }) => {
+                            self.draw_pixmap_data(&ctx, x, y, width, height, &data)?;
+                            // Cache for next time
+                            self.icon_cache.insert(name.clone(), CachedIcon {
+                                width,
+                                height,
+                                data,
+                            });
+                        }
+                        Ok(_) => {
+                            self.draw_placeholder(&ctx, x, y, name);
+                        }
+                        Err(e) => {
+                            warn!("Failed to load icon '{}': {}", name, e);
+                            self.draw_placeholder(&ctx, x, y, name);
+                        }
+                    }
                 } else {
-                    self.draw_placeholder(&ctx, x, y, &name);
+                    debug!("Icon '{}' not found in themes", name);
+                    self.draw_placeholder(&ctx, x, y, name);
                 }
             }
-            IconData::File(path) => {
-                // TODO: Load from file
-                self.draw_placeholder(&ctx, x, y, "?");
+            IconData::File(ref path) => {
+                let cache_key = path.to_string_lossy().to_string();
+                if let Some(cached) = self.icon_cache.get(&cache_key) {
+                    self.draw_pixmap_data(&ctx, x, y, cached.width, cached.height, &cached.data)?;
+                } else {
+                    match IconData::load_from_file(path, self.icon_size) {
+                        Ok(IconData::Pixmap { width, height, data }) => {
+                            self.draw_pixmap_data(&ctx, x, y, width, height, &data)?;
+                            self.icon_cache.insert(cache_key, CachedIcon {
+                                width,
+                                height,
+                                data,
+                            });
+                        }
+                        Ok(_) | Err(_) => {
+                            self.draw_placeholder(&ctx, x, y, "?");
+                        }
+                    }
+                }
             }
             IconData::Placeholder => {
                 self.draw_placeholder(&ctx, x, y, "?");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Draw pixmap data to the surface at position
+    fn draw_pixmap_data(&self, ctx: &Context, x: i32, y: i32, width: i32, height: i32, data: &[u8]) -> Result<()> {
+        // Cairo needs owned data for the surface
+        let data_copy = data.to_vec();
+        let stride = width * 4;
+
+        match ImageSurface::create_for_data(
+            data_copy.into_boxed_slice(),
+            Format::ARgb32,
+            width,
+            height,
+            stride,
+        ) {
+            Ok(icon_surface) => {
+                // Center the icon if it's smaller than icon_size
+                let offset_x = (self.icon_size as i32 - width) / 2;
+                let offset_y = (self.icon_size as i32 - height) / 2;
+
+                ctx.save().ok();
+                ctx.translate((x + offset_x) as f64, (y + offset_y) as f64);
+                ctx.set_source_surface(&icon_surface, 0.0, 0.0).ok();
+                ctx.paint().ok();
+                ctx.restore().ok();
+            }
+            Err(e) => {
+                warn!("Failed to create icon surface: {}", e);
             }
         }
 
@@ -172,6 +283,9 @@ impl TrayRenderer {
         sni_items: &[&SniItem],
         xembed_offset: i32,
     ) -> Result<i32> {
+        // Clear previous positions
+        self.sni_positions.clear();
+
         if sni_items.is_empty() {
             return Ok(xembed_offset);
         }
@@ -184,10 +298,20 @@ impl TrayRenderer {
         self.ensure_surface(total_width, self.icon_size)?;
         self.clear()?;
 
-        // Draw each SNI icon
+        // Draw each SNI icon and track positions
         let mut x = xembed_offset;
         for item in sni_items {
             self.draw_sni_icon(item, x, 0)?;
+
+            // Track position for hit testing
+            self.sni_positions.push(SniIconPosition {
+                id: item.id.clone(),
+                x,
+                y: 0,
+                width: self.icon_size as i32,
+                height: self.icon_size as i32,
+            });
+
             x += self.icon_size as i32 + self.spacing as i32;
         }
 

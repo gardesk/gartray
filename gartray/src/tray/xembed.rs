@@ -47,7 +47,19 @@ const SYSTEM_TRAY_REQUEST_DOCK: u32 = 0;
 
 /// XEMBED message types
 const XEMBED_EMBEDDED_NOTIFY: u32 = 0;
+const XEMBED_WINDOW_ACTIVATE: u32 = 1;
+const XEMBED_WINDOW_DEACTIVATE: u32 = 2;
+const XEMBED_REQUEST_FOCUS: u32 = 3;
+const XEMBED_FOCUS_IN: u32 = 4;
+const XEMBED_FOCUS_OUT: u32 = 5;
+const XEMBED_FOCUS_NEXT: u32 = 6;
+const XEMBED_FOCUS_PREV: u32 = 7;
+const XEMBED_MODALITY_ON: u32 = 10;
+const XEMBED_MODALITY_OFF: u32 = 11;
 const XEMBED_PROTOCOL_VERSION: u32 = 0;
+
+/// XEMBED flags
+const XEMBED_MAPPED: u32 = 1;
 
 /// Atoms needed for system tray protocol
 #[derive(Debug, Clone)]
@@ -83,6 +95,15 @@ pub struct TrayIcon {
     pub width: u16,
     pub height: u16,
     pub mapped: bool,
+}
+
+/// Button event on the tray window that wasn't handled by XEmbed icons
+#[derive(Debug, Clone)]
+pub struct TrayButtonEvent {
+    pub x: i16,
+    pub y: i16,
+    pub button: u8,
+    pub pressed: bool,
 }
 
 /// XEMBED tray manager using gartk-x11
@@ -334,15 +355,20 @@ impl XEmbedManager {
     }
 
     /// Process pending X11 events
-    pub fn process_events(&mut self) -> Result<()> {
+    /// Returns any button events that weren't handled by XEmbed icons
+    pub fn process_events(&mut self) -> Result<Vec<TrayButtonEvent>> {
+        let mut unhandled_events = Vec::new();
         while let Some(event) = self.conn.poll_event()? {
-            self.handle_event(event)?;
+            if let Some(btn_event) = self.handle_event(event)? {
+                unhandled_events.push(btn_event);
+            }
         }
-        Ok(())
+        Ok(unhandled_events)
     }
 
     /// Handle a single X11 event
-    fn handle_event(&mut self, event: Event) -> Result<()> {
+    /// Returns Some(TrayButtonEvent) if a button event wasn't handled by XEmbed icons
+    fn handle_event(&mut self, event: Event) -> Result<Option<TrayButtonEvent>> {
         match event {
             Event::ClientMessage(e) => {
                 if e.type_ == self.atoms.net_system_tray_opcode {
@@ -353,11 +379,45 @@ impl XEmbedManager {
                         info!("Dock request from window {}", icon_window);
                         self.dock_icon(icon_window)?;
                     }
+                } else if e.type_ == self.atoms.xembed {
+                    // Handle XEMBED protocol messages from embedded icons
+                    let msg_type = e.data.as_data32()[1];
+                    debug!("XEMBED message type {} from window {}", msg_type, e.window);
+
+                    match msg_type {
+                        XEMBED_REQUEST_FOCUS => {
+                            // Icon wants keyboard focus
+                            debug!("Icon {} requests focus", e.window);
+                            if self.icons.contains_key(&e.window) {
+                                let _ = self.conn.inner().set_input_focus(
+                                    xproto::InputFocus::PARENT,
+                                    e.window,
+                                    x11rb::CURRENT_TIME,
+                                );
+                                self.conn.flush()?;
+                            }
+                        }
+                        XEMBED_FOCUS_NEXT | XEMBED_FOCUS_PREV => {
+                            // Icon wants to pass focus to next/prev
+                            debug!("Icon {} wants focus navigation", e.window);
+                        }
+                        _ => {
+                            debug!("Unhandled XEMBED message: {}", msg_type);
+                        }
+                    }
                 }
             }
             Event::DestroyNotify(e) => {
                 if self.icons.remove(&e.window).is_some() {
                     info!("Tray icon {} destroyed", e.window);
+                    self.reposition_icons()?;
+                }
+            }
+            Event::ReparentNotify(e) => {
+                // Track if icon was reparented away (e.g., app crashed and WM cleaned up)
+                if self.icons.contains_key(&e.window) && e.parent != self.tray_window.id() {
+                    debug!("Icon {} reparented away from tray", e.window);
+                    self.icons.remove(&e.window);
                     self.reposition_icons()?;
                 }
             }
@@ -368,31 +428,91 @@ impl XEmbedManager {
                     self.reposition_icons()?;
                 }
             }
+            Event::MapNotify(e) => {
+                if let Some(icon) = self.icons.get_mut(&e.window) {
+                    if !icon.mapped {
+                        icon.mapped = true;
+                        debug!("Tray icon {} mapped", e.window);
+                        self.reposition_icons()?;
+                    }
+                }
+            }
+            Event::ConfigureNotify(e) => {
+                // Log configuration changes for debugging
+                if self.icons.contains_key(&e.window) {
+                    debug!(
+                        "Icon {} configured: {}x{} at ({}, {}), above_sibling={:?}",
+                        e.window, e.width, e.height, e.x, e.y, e.above_sibling
+                    );
+                }
+            }
             Event::Expose(e) if e.window == self.tray_window.id() => {
                 // Redraw tray background if needed
+                debug!("Tray expose event");
             }
             Event::ButtonPress(e) if e.event == self.tray_window.id() => {
-                // Forward click to appropriate icon
-                self.forward_button_event(e.event_x, e.event_y, e.detail, true)?;
+                // Check if click is on an XEmbed icon
+                if !self.forward_button_event(e.event_x, e.event_y, e.detail, true)? {
+                    // Not on XEmbed icon, return event for SNI handling
+                    return Ok(Some(TrayButtonEvent {
+                        x: e.event_x,
+                        y: e.event_y,
+                        button: e.detail,
+                        pressed: true,
+                    }));
+                }
             }
             Event::ButtonRelease(e) if e.event == self.tray_window.id() => {
-                self.forward_button_event(e.event_x, e.event_y, e.detail, false)?;
+                if !self.forward_button_event(e.event_x, e.event_y, e.detail, false)? {
+                    return Ok(Some(TrayButtonEvent {
+                        x: e.event_x,
+                        y: e.event_y,
+                        button: e.detail,
+                        pressed: false,
+                    }));
+                }
+            }
+            Event::PropertyNotify(e) => {
+                // Track property changes on icons (e.g., _XEMBED_INFO changes)
+                if self.icons.contains_key(&e.window) {
+                    debug!("Property {} changed on icon {}", e.atom, e.window);
+                }
             }
             _ => {}
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Dock a tray icon
     fn dock_icon(&mut self, icon_window: xproto::Window) -> Result<()> {
         let icon_size = self.config.icon_size as u16;
-        let inner = self.conn.inner();
+        let tray_window_id = self.tray_window.id();
+        let xembed_atom = self.atoms.xembed;
 
-        // Subscribe to events on the icon
-        let values = xproto::ChangeWindowAttributesAux::new()
-            .event_mask(EventMask::STRUCTURE_NOTIFY | EventMask::PROPERTY_CHANGE);
+        debug!("Beginning dock process for icon {}", icon_window);
 
-        inner.change_window_attributes(icon_window, &values)?;
+        // Get the icon's current geometry before reparenting
+        {
+            let inner = self.conn.inner();
+            if let Ok(geom) = inner.get_geometry(icon_window) {
+                if let Ok(g) = geom.reply() {
+                    debug!(
+                        "Icon {} original geometry: {}x{} at ({}, {}), depth={}, root={}",
+                        icon_window, g.width, g.height, g.x, g.y, g.depth, g.root
+                    );
+                }
+            }
+
+            // Get icon's current attributes
+            if let Ok(attrs) = inner.get_window_attributes(icon_window) {
+                if let Ok(a) = attrs.reply() {
+                    debug!(
+                        "Icon {} attributes: visual={}, class={:?}, map_state={:?}",
+                        icon_window, a.visual, a.class, a.map_state
+                    );
+                }
+            }
+        }
 
         // Calculate position
         let x = {
@@ -400,34 +520,71 @@ impl XEmbedManager {
             mapped_count * (icon_size as i16 + self.config.spacing as i16)
         };
 
-        // Reparent to tray window
-        inner.reparent_window(icon_window, self.tray_window.id(), x, 0)?;
+        // Perform all X11 operations
+        {
+            let inner = self.conn.inner();
 
-        // Resize to our icon size
-        inner.configure_window(
-            icon_window,
-            &ConfigureWindowAux::new()
-                .width(icon_size as u32)
-                .height(icon_size as u32),
-        )?;
+            // Subscribe to events on the icon
+            let values = xproto::ChangeWindowAttributesAux::new()
+                .event_mask(
+                    EventMask::STRUCTURE_NOTIFY |
+                    EventMask::PROPERTY_CHANGE |
+                    EventMask::EXPOSURE
+                );
 
-        // Map the icon
-        inner.map_window(icon_window)?;
+            inner.change_window_attributes(icon_window, &values)?;
+            debug!("Set event mask on icon {}", icon_window);
 
-        // Send XEMBED_EMBEDDED_NOTIFY
-        let event = ClientMessageEvent::new(
-            32,
-            icon_window,
-            self.atoms.xembed,
-            [
-                x11rb::CURRENT_TIME,
-                XEMBED_EMBEDDED_NOTIFY,
-                0,
-                self.tray_window.id(),
-                XEMBED_PROTOCOL_VERSION,
-            ],
-        );
-        inner.send_event(false, icon_window, EventMask::NO_EVENT, event)?;
+            // Reparent to tray window
+            debug!("Reparenting icon {} to tray {} at x={}", icon_window, tray_window_id, x);
+            inner.reparent_window(icon_window, tray_window_id, x, 0)?;
+
+            // Resize to our icon size
+            debug!("Resizing icon {} to {}x{}", icon_window, icon_size, icon_size);
+            inner.configure_window(
+                icon_window,
+                &ConfigureWindowAux::new()
+                    .width(icon_size as u32)
+                    .height(icon_size as u32)
+                    .border_width(0u32),
+            )?;
+
+            // Map the icon
+            debug!("Mapping icon {}", icon_window);
+            inner.map_window(icon_window)?;
+
+            // Send XEMBED_EMBEDDED_NOTIFY
+            debug!("Sending XEMBED_EMBEDDED_NOTIFY to icon {}", icon_window);
+            let notify_event = ClientMessageEvent::new(
+                32,
+                icon_window,
+                xembed_atom,
+                [
+                    x11rb::CURRENT_TIME,
+                    XEMBED_EMBEDDED_NOTIFY,
+                    0,
+                    tray_window_id,
+                    XEMBED_PROTOCOL_VERSION,
+                ],
+            );
+            inner.send_event(false, icon_window, EventMask::NO_EVENT, notify_event)?;
+
+            // Also send XEMBED_WINDOW_ACTIVATE to tell the icon the embedder is active
+            debug!("Sending XEMBED_WINDOW_ACTIVATE to icon {}", icon_window);
+            let activate_event = ClientMessageEvent::new(
+                32,
+                icon_window,
+                xembed_atom,
+                [
+                    x11rb::CURRENT_TIME,
+                    XEMBED_WINDOW_ACTIVATE,
+                    0,
+                    0,
+                    0,
+                ],
+            );
+            inner.send_event(false, icon_window, EventMask::NO_EVENT, activate_event)?;
+        }
 
         // Track the icon
         self.icons.insert(icon_window, TrayIcon {
@@ -440,7 +597,20 @@ impl XEmbedManager {
         self.update_tray_size()?;
         self.conn.flush()?;
 
-        info!("Docked icon {} at x={}", icon_window, x);
+        // Verify the icon's final state
+        {
+            let inner = self.conn.inner();
+            if let Ok(geom) = inner.get_geometry(icon_window) {
+                if let Ok(g) = geom.reply() {
+                    debug!(
+                        "Icon {} final geometry: {}x{} at ({}, {})",
+                        icon_window, g.width, g.height, g.x, g.y
+                    );
+                }
+            }
+        }
+
+        info!("Docked icon {} at x={} (total {} icons)", icon_window, x, self.icons.len());
         Ok(())
     }
 
@@ -466,8 +636,9 @@ impl XEmbedManager {
         Ok(())
     }
 
-    /// Forward a button event to the appropriate icon
-    fn forward_button_event(&self, x: i16, y: i16, button: u8, press: bool) -> Result<()> {
+    /// Forward a button event to the appropriate XEmbed icon
+    /// Returns true if the event was forwarded, false if no XEmbed icon was at that position
+    fn forward_button_event(&self, x: i16, y: i16, button: u8, press: bool) -> Result<bool> {
         let icon_size = self.config.icon_size as i16;
         let spacing = self.config.spacing as i16;
 
@@ -480,7 +651,7 @@ impl XEmbedManager {
 
             if x >= icon_x && x < icon_x + icon_size {
                 // Found the icon - send button event
-                debug!("Forwarding button {} {} to icon {}", button, if press { "press" } else { "release" }, icon.window);
+                debug!("Forwarding button {} {} to XEmbed icon {}", button, if press { "press" } else { "release" }, icon.window);
 
                 let event_type = if press {
                     xproto::BUTTON_PRESS_EVENT
@@ -511,13 +682,13 @@ impl XEmbedManager {
                     event,
                 )?;
                 self.conn.flush()?;
-                break;
+                return Ok(true);
             }
 
             icon_x += icon_size + spacing;
         }
 
-        Ok(())
+        Ok(false)
     }
 
     /// Update tray window size based on icon count
@@ -552,6 +723,49 @@ impl XEmbedManager {
     /// Check if we're the selection owner
     pub fn is_owner(&self) -> bool {
         self.is_owner
+    }
+
+    /// Show the tray window
+    pub fn show(&mut self) -> Result<()> {
+        self.conn.inner().map_window(self.tray_window.id())?;
+        self.conn.flush()?;
+        debug!("Tray window shown");
+        Ok(())
+    }
+
+    /// Hide the tray window
+    pub fn hide(&mut self) -> Result<()> {
+        self.conn.inner().unmap_window(self.tray_window.id())?;
+        self.conn.flush()?;
+        debug!("Tray window hidden");
+        Ok(())
+    }
+
+    /// Check if tray window is mapped
+    pub fn is_visible(&self) -> bool {
+        if let Ok(attrs) = self.conn.inner().get_window_attributes(self.tray_window.id()) {
+            if let Ok(a) = attrs.reply() {
+                return a.map_state == xproto::MapState::VIEWABLE;
+            }
+        }
+        false
+    }
+
+    /// Get diagnostic information about the tray
+    pub fn diagnostics(&self) -> String {
+        let mut diag = format!(
+            "XEmbed Tray Diagnostics:\n  Owner: {}\n  Tray window: {}\n  Selection window: {}\n  Icons: {}\n",
+            self.is_owner, self.tray_window.id(), self.selection_window, self.icons.len()
+        );
+
+        for (id, icon) in &self.icons {
+            diag.push_str(&format!(
+                "  - Icon {}: {}x{}, mapped={}\n",
+                id, icon.width, icon.height, icon.mapped
+            ));
+        }
+
+        diag
     }
 
     /// Release the selection on shutdown

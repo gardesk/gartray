@@ -1,10 +1,12 @@
 //! D-Bus Menu (com.canonical.dbusmenu) client
 //!
 //! Fetches and parses menus exposed by SNI items.
+//! Implements the com.canonical.dbusmenu interface.
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use zbus::{Connection, proxy};
+use zbus::zvariant::OwnedValue;
 use tracing::{debug, warn};
 
 /// Proxy for com.canonical.dbusmenu interface
@@ -140,10 +142,18 @@ impl MenuClient {
 
 /// Parse a menu item from D-Bus layout data
 fn parse_menu_item(
-    data: (i32, HashMap<String, zbus::zvariant::OwnedValue>, Vec<zbus::zvariant::OwnedValue>)
+    data: (i32, HashMap<String, OwnedValue>, Vec<OwnedValue>)
 ) -> MenuItem {
     let (id, props, children_data) = data;
+    parse_menu_item_inner(id, &props, &children_data)
+}
 
+/// Inner recursive menu item parser
+fn parse_menu_item_inner(
+    id: i32,
+    props: &HashMap<String, OwnedValue>,
+    children_data: &[OwnedValue]
+) -> MenuItem {
     let mut item = MenuItem {
         id,
         ..Default::default()
@@ -195,10 +205,69 @@ fn parse_menu_item(
         }
     }
 
-    // Children parsing is complex due to recursive structure
-    // For now, we'll skip recursive children - they need special handling
-    // TODO: Implement recursive menu parsing
-    let _ = children_data;
+    // Parse children recursively
+    // Each child is a (i32, HashMap<String, OwnedValue>, Vec<OwnedValue>) variant
+    for child_value in children_data {
+        if let Ok(child_struct) = <&zbus::zvariant::Structure>::try_from(child_value) {
+            let fields = child_struct.fields();
+            if fields.len() >= 3 {
+                // Extract the tuple (id, props, children)
+                let child_id = if let Ok(id) = <i32>::try_from(&fields[0]) {
+                    id
+                } else {
+                    continue;
+                };
+
+                // Parse properties dict
+                let child_props: HashMap<String, OwnedValue> = if let Ok(dict) = <&zbus::zvariant::Dict>::try_from(&fields[1]) {
+                    dict.iter()
+                        .filter_map(|(k, v)| {
+                            let key = <&str>::try_from(k).ok()?.to_string();
+                            Some((key, v.try_to_owned().ok()?))
+                        })
+                        .collect()
+                } else {
+                    HashMap::new()
+                };
+
+                // Parse children array
+                let grandchildren: Vec<OwnedValue> = if let Ok(arr) = <&zbus::zvariant::Array>::try_from(&fields[2]) {
+                    arr.iter()
+                        .filter_map(|v| v.try_to_owned().ok())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+
+                // Recursively parse the child
+                let child_item = parse_menu_item_inner(child_id, &child_props, &grandchildren);
+                if child_item.visible {
+                    item.children.push(child_item);
+                }
+            }
+        }
+    }
 
     item
+}
+
+/// Get a human-readable summary of a menu tree (for debugging)
+pub fn menu_summary(item: &MenuItem, depth: usize) -> String {
+    let indent = "  ".repeat(depth);
+    let mut result = format!(
+        "{}[{}] {} (type={}, enabled={}, toggle={:?}:{})\n",
+        indent,
+        item.id,
+        item.label.as_deref().unwrap_or("(no label)"),
+        item.item_type,
+        item.enabled,
+        item.toggle_type,
+        item.toggle_state,
+    );
+
+    for child in &item.children {
+        result.push_str(&menu_summary(child, depth + 1));
+    }
+
+    result
 }

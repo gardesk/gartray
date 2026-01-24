@@ -76,6 +76,8 @@ trait StatusNotifierItem {
 /// Represents a StatusNotifierItem
 pub struct SniItem {
     proxy: StatusNotifierItemProxy<'static>,
+    /// Bus name this item belongs to
+    bus_name: String,
     /// Cached ID
     pub id: String,
     /// Cached icon name
@@ -121,12 +123,13 @@ impl SniItem {
         };
 
         debug!(
-            "SNI item created: id={}, icon={:?}, status={}",
-            id, icon_name, status
+            "SNI item created: id={}, icon={:?}, status={}, bus={}",
+            id, icon_name, status, bus_name
         );
 
         Ok(Self {
             proxy,
+            bus_name: bus_name.to_string(),
             id,
             icon_name,
             icon_pixmap,
@@ -199,5 +202,10 @@ impl SniItem {
     /// Get the menu object path if available
     pub async fn menu_path(&self) -> Option<String> {
         self.proxy.menu().await.ok().map(|p| p.to_string())
+    }
+
+    /// Get the bus name this item is connected to
+    pub fn bus_name(&self) -> &str {
+        &self.bus_name
     }
 }
