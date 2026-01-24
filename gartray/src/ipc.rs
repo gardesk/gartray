@@ -7,8 +7,11 @@ use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 use tracing::{debug, error, info};
 
 /// Get the path to the IPC socket
@@ -54,6 +57,9 @@ pub struct Response {
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
+    /// Panel visibility state (for sync with garbar)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
 }
 
 impl Response {
@@ -62,6 +68,16 @@ impl Response {
             success: true,
             message: None,
             data: None,
+            visible: None,
+        }
+    }
+
+    pub fn ok_with_visible(visible: bool) -> Self {
+        Self {
+            success: true,
+            message: None,
+            data: None,
+            visible: Some(visible),
         }
     }
 
@@ -70,6 +86,7 @@ impl Response {
             success: true,
             message: Some(msg.into()),
             data: None,
+            visible: None,
         }
     }
 
@@ -78,8 +95,17 @@ impl Response {
             success: false,
             message: Some(msg.into()),
             data: None,
+            visible: None,
         }
     }
+}
+
+/// Shared panel visibility state
+pub type PanelVisibility = Arc<AtomicBool>;
+
+/// Create a new shared visibility state
+pub fn new_visibility() -> PanelVisibility {
+    Arc::new(AtomicBool::new(false))
 }
 
 /// IPC server for the daemon
@@ -88,17 +114,19 @@ pub struct IpcServer {
     listener: Option<UnixListener>,
     tx: Sender<Command>,
     rx: Option<Receiver<Command>>,
+    visibility: PanelVisibility,
 }
 
 impl IpcServer {
-    /// Create a new IPC server
-    pub fn new() -> (Self, Receiver<Command>) {
+    /// Create a new IPC server with shared visibility state
+    pub fn new(visibility: PanelVisibility) -> (Self, Receiver<Command>) {
         let (tx, rx) = mpsc::channel();
         let server = Self {
             socket_path: socket_path(),
             listener: None,
             tx,
             rx: None,
+            visibility,
         };
         (server, rx)
     }
@@ -116,6 +144,7 @@ impl IpcServer {
         info!("IPC server listening on {}", self.socket_path.display());
 
         let tx = self.tx.clone();
+        let visibility = self.visibility.clone();
         self.listener = Some(listener.try_clone()?);
 
         // Spawn listener thread
@@ -124,8 +153,9 @@ impl IpcServer {
                 match stream {
                     Ok(stream) => {
                         let tx = tx.clone();
+                        let vis = visibility.clone();
                         thread::spawn(move || {
-                            if let Err(e) = handle_client(stream, tx) {
+                            if let Err(e) = handle_client(stream, tx, vis) {
                                 error!("Client error: {}", e);
                             }
                         });
@@ -156,7 +186,7 @@ impl Drop for IpcServer {
 }
 
 /// Handle a client connection
-fn handle_client(mut stream: UnixStream, tx: Sender<Command>) -> Result<()> {
+fn handle_client(mut stream: UnixStream, tx: Sender<Command>, visibility: PanelVisibility) -> Result<()> {
     let reader = BufReader::new(stream.try_clone()?);
 
     for line in reader.lines() {
@@ -165,9 +195,25 @@ fn handle_client(mut stream: UnixStream, tx: Sender<Command>) -> Result<()> {
 
         let response = match serde_json::from_str::<Command>(&line) {
             Ok(cmd) => {
+                let needs_visibility = matches!(cmd, Command::Toggle { .. } | Command::Show { .. } | Command::Hide | Command::Status);
+
                 // Forward command to daemon
-                if tx.send(cmd.clone()).is_err() {
+                if tx.send(cmd).is_err() {
                     Response::error("Daemon not responding")
+                } else if needs_visibility {
+                    // Wait for daemon to process command and update visibility
+                    // Poll visibility until it changes or timeout (max ~150ms)
+                    // Longer timeout needed because daemon may be sleeping in poll_panel_events
+                    let initial = visibility.load(Ordering::SeqCst);
+                    let mut final_visible = initial;
+                    for _ in 0..30 {
+                        thread::sleep(Duration::from_millis(5));
+                        final_visible = visibility.load(Ordering::SeqCst);
+                        if final_visible != initial {
+                            break;
+                        }
+                    }
+                    Response::ok_with_visible(final_visible)
                 } else {
                     Response::ok()
                 }

@@ -4,12 +4,13 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::Receiver;
 use tokio::signal::unix::{signal, SignalKind};
 use tracing::{debug, info, warn};
 
 use crate::config::{self, Config};
-use crate::ipc::{Command, IpcServer};
+use crate::ipc::{Command, IpcServer, PanelVisibility, new_visibility};
 use crate::panel::PopupPanel;
 
 /// Get the path to the PID file
@@ -92,12 +93,15 @@ pub struct Daemon {
     /// Quick settings popup panel
     panel: Option<PopupPanel>,
     running: bool,
+    /// Shared visibility state for IPC sync
+    visibility: PanelVisibility,
 }
 
 impl Daemon {
     /// Create a new daemon
     pub fn new(config: Config) -> Result<Self> {
-        let (ipc_server, ipc_rx) = IpcServer::new();
+        let visibility = new_visibility();
+        let (ipc_server, ipc_rx) = IpcServer::new(visibility.clone());
 
         // Create popup panel if enabled
         let panel = if config.panel.enabled {
@@ -121,6 +125,7 @@ impl Daemon {
             ipc_rx,
             panel,
             running: true,
+            visibility,
         })
     }
 
@@ -172,6 +177,12 @@ impl Daemon {
         }
     }
 
+    /// Update the shared visibility state
+    fn update_visibility(&self) {
+        let visible = self.panel.as_ref().map(|p| p.is_visible()).unwrap_or(false);
+        self.visibility.store(visible, Ordering::SeqCst);
+    }
+
     /// Handle an IPC command
     fn handle_ipc_command(&mut self, cmd: Command) {
         debug!("Handling IPC command: {:?}", cmd);
@@ -182,22 +193,28 @@ impl Daemon {
                     let _ = panel.show(x, y);
                     let _ = panel.render();
                 }
+                self.update_visibility();
             }
             Command::Hide => {
                 info!("Hiding panel");
                 if let Some(ref mut panel) = self.panel {
                     let _ = panel.hide();
                 }
+                self.update_visibility();
             }
             Command::Toggle { x, y } => {
                 if let Some(ref mut panel) = self.panel {
-                    let visible = panel.is_visible();
-                    info!("Panel toggle at ({}, {}): {} -> {}", x, y, visible, !visible);
-                    if visible {
+                    let was_visible = panel.is_visible();
+                    info!("Panel toggle at ({}, {}): {} -> {}", x, y, was_visible, !was_visible);
+                    if was_visible {
                         let _ = panel.hide();
+                        // Set visibility to false BEFORE any events can change it
+                        self.visibility.store(false, Ordering::SeqCst);
                     } else {
                         let _ = panel.show(x, y);
                         let _ = panel.render();
+                        // Set visibility to true BEFORE any events can change it
+                        self.visibility.store(true, Ordering::SeqCst);
                     }
                 }
             }
@@ -206,6 +223,7 @@ impl Daemon {
                 let _ = self.handle_reload();
             }
             Command::Status => {
+                self.update_visibility();
                 let panel_visible = self.panel.as_ref().map(|p| p.is_visible()).unwrap_or(false);
                 info!(
                     "Status: running, panel {}",
@@ -223,13 +241,19 @@ impl Daemon {
     async fn poll_panel_events(&mut self) -> Result<()> {
         // Process panel events
         if let Some(ref mut panel) = self.panel {
+            let was_visible = panel.is_visible();
             if let Err(e) = panel.process_events() {
                 warn!("Panel event error: {}", e);
             }
+            // Only update visibility if panel was closed by events (escape/click-outside)
+            let is_visible = panel.is_visible();
+            if was_visible && !is_visible {
+                self.visibility.store(false, Ordering::SeqCst);
+            }
         }
 
-        // Small delay to prevent busy loop
-        tokio::time::sleep(tokio::time::Duration::from_millis(16)).await;
+        // Small delay to prevent busy loop (8ms for responsive IPC)
+        tokio::time::sleep(tokio::time::Duration::from_millis(8)).await;
         Ok(())
     }
 

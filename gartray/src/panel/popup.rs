@@ -5,8 +5,9 @@
 use anyhow::{Context, Result};
 use cairo::{Context as CairoContext, Format, ImageSurface};
 use gartk_x11::{Connection, Window, WindowConfig};
-use x11rb::protocol::xproto::{ConnectionExt, EventMask, GrabMode};
+use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, EventMask, GrabMode, PropMode};
 use x11rb::protocol::randr::ConnectionExt as RandrConnectionExt;
+use x11rb::wrapper::ConnectionExt as WrapperConnectionExt;
 use x11rb::CURRENT_TIME;
 use tracing::{debug, info, warn};
 
@@ -133,6 +134,8 @@ pub struct PopupPanel {
     last_wifi_scan: Option<std::time::Instant>,
     /// Previously focused window (to restore on hide)
     previous_focus: Option<u32>,
+    /// Time when panel was shown (for grace period on FocusOut)
+    show_time: Option<std::time::Instant>,
 }
 
 impl PopupPanel {
@@ -265,6 +268,7 @@ impl PopupPanel {
             last_render: None,
             last_wifi_scan: None,
             previous_focus: None,
+            show_time: None,
         })
     }
 
@@ -288,6 +292,9 @@ impl PopupPanel {
             window.map()?;
             self.conn.flush()?;
             info!("Panel window {} mapped at ({}, {})", window.id(), self.pos_x, self.pos_y);
+
+            // Record show time for FocusOut grace period
+            self.show_time = Some(std::time::Instant::now());
 
             // Save current focus before taking it
             if let Ok(focus_reply) = self.conn.inner().get_input_focus()?.reply() {
@@ -570,6 +577,17 @@ impl PopupPanel {
                         | EventMask::POINTER_MOTION  // For hover effects
                         | EventMask::BUTTON1_MOTION  // For slider dragging
                 ),
+        )?;
+
+        // Set window type to POPUP_MENU to prevent picom from applying inactive transparency
+        let wm_type = self.conn.inner().intern_atom(false, b"_NET_WM_WINDOW_TYPE")?.reply()?.atom;
+        let popup_type = self.conn.inner().intern_atom(false, b"_NET_WM_WINDOW_TYPE_POPUP_MENU")?.reply()?.atom;
+        self.conn.inner().change_property32(
+            PropMode::REPLACE,
+            window.id(),
+            wm_type,
+            AtomEnum::ATOM,
+            &[popup_type],
         )?;
 
         info!("Created panel window {} ({}x{}) at ({}, {})",
@@ -1670,6 +1688,15 @@ impl PopupPanel {
                     if self.window.as_ref().map(|w| w.id()) == Some(e.event) {
                         use x11rb::protocol::xproto::NotifyMode;
                         if e.mode == NotifyMode::NORMAL {
+                            // Grace period: ignore FocusOut shortly after showing
+                            // This prevents hiding when garbar's click causes focus bounce
+                            if let Some(show_time) = self.show_time {
+                                let elapsed = show_time.elapsed();
+                                if elapsed < std::time::Duration::from_millis(150) {
+                                    debug!("Ignoring FocusOut during grace period ({}ms)", elapsed.as_millis());
+                                    continue;
+                                }
+                            }
                             debug!("Panel lost focus (normal), hiding");
                             self.hide()?;
                             return Ok(true);
