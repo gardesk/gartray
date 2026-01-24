@@ -119,10 +119,18 @@ pub struct PopupPanel {
     press_button: Option<String>,
     /// WiFi list scroll offset (number of items scrolled)
     wifi_scroll_offset: usize,
+    /// Bluetooth list scroll offset (number of items scrolled)
+    bluetooth_scroll_offset: usize,
+    /// WiFi password entry - SSID we're entering password for
+    password_entry_ssid: Option<String>,
+    /// WiFi password being typed
+    password_text: String,
     /// Last time slider value was applied (for throttling wpctl calls)
     last_slider_apply: Option<std::time::Instant>,
     /// Last time we rendered (for 60fps cap during drag)
     last_render: Option<std::time::Instant>,
+    /// Last time WiFi networks were scanned (for periodic refresh)
+    last_wifi_scan: Option<std::time::Instant>,
 }
 
 impl PopupPanel {
@@ -248,8 +256,12 @@ impl PopupPanel {
             press_start: None,
             press_button: None,
             wifi_scroll_offset: 0,
+            bluetooth_scroll_offset: 0,
+            password_entry_ssid: None,
+            password_text: String::new(),
             last_slider_apply: None,
             last_render: None,
+            last_wifi_scan: None,
         })
     }
 
@@ -273,6 +285,13 @@ impl PopupPanel {
             window.map()?;
             self.conn.flush()?;
             info!("Panel window {} mapped at ({}, {})", window.id(), self.pos_x, self.pos_y);
+
+            // Set input focus so we receive keyboard events
+            self.conn.inner().set_input_focus(
+                x11rb::protocol::xproto::InputFocus::PARENT,
+                window.id(),
+                CURRENT_TIME,
+            )?.check()?;
 
             // Grab pointer to detect clicks outside the panel
             // Retry a few times in case another app (e.g., garbar) has the implicit button grab
@@ -1122,6 +1141,11 @@ impl PopupPanel {
 
         self.list_items.clear();
 
+        // If password entry is active, show password UI instead of network list
+        if let Some(ref ssid) = self.password_entry_ssid.clone() {
+            return self.render_password_entry(ctx, start_y, &ssid);
+        }
+
         // Check if scanning
         let is_scanning = self.network.as_ref().map(|n| n.is_scanning()).unwrap_or(false);
 
@@ -1198,12 +1222,14 @@ impl PopupPanel {
             ctx.move_to(ssid_x, item_y + ITEM_HEIGHT / 2.0 + 4.0);
             ctx.show_text(&ssid).ok();
 
-            // Signal strength bars (5 bars)
+            // Signal strength bars (5 bars, anchored at bottom)
             let bar_x = self.width as f64 - 80.0;
             let bar_width = 3.0;
             let bar_spacing = 2.0;
             let max_bar_height = 14.0;
             let strength = ap.strength as f64 / 100.0;
+            // Vertical base for all bars (bottom-aligned)
+            let bar_base_y = item_y + (ITEM_HEIGHT + max_bar_height) / 2.0;
 
             for bar in 0..5 {
                 let bar_height = max_bar_height * (bar as f64 + 1.0) / 5.0;
@@ -1216,7 +1242,7 @@ impl PopupPanel {
                 }
 
                 let bx = bar_x + bar as f64 * (bar_width + bar_spacing);
-                let by = item_y + (ITEM_HEIGHT - bar_height) / 2.0;
+                let by = bar_base_y - bar_height; // Anchor at bottom
                 ctx.rectangle(bx, by, bar_width, bar_height);
                 ctx.fill().ok();
             }
@@ -1258,11 +1284,74 @@ impl PopupPanel {
         Ok(y - start_y + PADDING)
     }
 
+    /// Render password entry UI for WiFi connection
+    fn render_password_entry(&self, ctx: &CairoContext, start_y: f64, ssid: &str) -> Result<f64> {
+        const PADDING: f64 = 8.0;
+        let mut y = start_y;
+
+        // Network name header
+        ctx.set_source_rgba(0.9, 0.9, 0.9, 1.0);
+        ctx.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
+        ctx.set_font_size(13.0);
+        ctx.move_to(16.0 + PADDING, y + 16.0);
+        let header = format!("Connect to {}", ssid);
+        ctx.show_text(&header).ok();
+        y += 28.0;
+
+        // "Password:" label
+        ctx.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+        ctx.set_source_rgba(0.7, 0.7, 0.7, 1.0);
+        ctx.set_font_size(11.0);
+        ctx.move_to(16.0 + PADDING, y + 12.0);
+        ctx.show_text("Password:").ok();
+        y += 18.0;
+
+        // Password input field
+        let input_x = 16.0 + PADDING;
+        let input_width = self.width as f64 - 32.0 - PADDING * 2.0;
+        let input_height = 32.0;
+
+        // Input background
+        ctx.set_source_rgba(0.15, 0.15, 0.18, 1.0);
+        self.draw_rounded_rect(ctx, input_x, y, input_width, input_height, 4.0);
+        ctx.fill().ok();
+
+        // Input border
+        ctx.set_source_rgba(0.3, 0.5, 0.7, 1.0);
+        self.draw_rounded_rect(ctx, input_x, y, input_width, input_height, 4.0);
+        ctx.stroke().ok();
+
+        // Password text (masked with dots)
+        ctx.set_source_rgba(0.9, 0.9, 0.9, 1.0);
+        ctx.set_font_size(14.0);
+        let masked: String = "●".repeat(self.password_text.len());
+        ctx.move_to(input_x + 8.0, y + input_height / 2.0 + 5.0);
+        ctx.show_text(&masked).ok();
+
+        // Cursor (blinking could be added later)
+        let cursor_x = input_x + 8.0 + (self.password_text.len() as f64 * 10.0);
+        ctx.set_source_rgba(0.9, 0.9, 0.9, 1.0);
+        ctx.rectangle(cursor_x, y + 6.0, 2.0, input_height - 12.0);
+        ctx.fill().ok();
+
+        y += input_height + 8.0;
+
+        // Hint text
+        ctx.set_source_rgba(0.5, 0.5, 0.55, 1.0);
+        ctx.set_font_size(10.0);
+        ctx.move_to(16.0 + PADDING, y + 10.0);
+        ctx.show_text("Press Enter to connect, Escape to cancel").ok();
+        y += 20.0;
+
+        Ok(y - start_y + PADDING)
+    }
+
     /// Render Bluetooth device list, returns height used
     fn render_bluetooth_list(&mut self, ctx: &CairoContext, start_y: f64) -> Result<f64> {
         const ITEM_HEIGHT: f64 = 32.0;
-        const MAX_ITEMS: usize = 5;
+        const MAX_VISIBLE: usize = 5;
         const PADDING: f64 = 8.0;
+        const SCROLL_INDICATOR_HEIGHT: f64 = 18.0;
 
         self.list_items.clear();
 
@@ -1279,8 +1368,33 @@ impl PopupPanel {
             return Ok(ITEM_HEIGHT + PADDING);
         }
 
+        // Clamp scroll offset to valid range
+        let max_scroll = devices.len().saturating_sub(MAX_VISIBLE);
+        if self.bluetooth_scroll_offset > max_scroll {
+            self.bluetooth_scroll_offset = max_scroll;
+        }
+
+        let can_scroll_up = self.bluetooth_scroll_offset > 0;
+        let can_scroll_down = self.bluetooth_scroll_offset < max_scroll;
+
         let mut y = start_y;
-        for device in devices.iter().take(MAX_ITEMS) {
+
+        // Scroll up indicator
+        if can_scroll_up {
+            ctx.set_source_rgba(0.5, 0.5, 0.5, 1.0);
+            ctx.set_font_size(10.0);
+            let indicator_text = format!("▲ {} more above", self.bluetooth_scroll_offset);
+            ctx.move_to(16.0 + PADDING, y + 12.0);
+            ctx.show_text(&indicator_text).ok();
+            y += SCROLL_INDICATOR_HEIGHT;
+        }
+
+        // Render visible devices
+        let visible_devices = devices.iter()
+            .skip(self.bluetooth_scroll_offset)
+            .take(MAX_VISIBLE);
+
+        for device in visible_devices {
             let item_y = y;
 
             // Background for connected item
@@ -1333,13 +1447,15 @@ impl PopupPanel {
             y += ITEM_HEIGHT;
         }
 
-        // Show count if more items
-        if devices.len() > MAX_ITEMS {
+        // Scroll down indicator
+        if can_scroll_down {
+            let remaining = devices.len() - self.bluetooth_scroll_offset - MAX_VISIBLE;
             ctx.set_source_rgba(0.5, 0.5, 0.5, 1.0);
-            ctx.set_font_size(11.0);
+            ctx.set_font_size(10.0);
+            let indicator_text = format!("▼ {} more below", remaining);
             ctx.move_to(16.0 + PADDING, y + 12.0);
-            ctx.show_text(&format!("+{} more devices", devices.len() - MAX_ITEMS)).ok();
-            y += 20.0;
+            ctx.show_text(&indicator_text).ok();
+            y += SCROLL_INDICATOR_HEIGHT;
         }
 
         // Hint for hold-to-toggle
@@ -1350,6 +1466,79 @@ impl PopupPanel {
         y += 20.0;
 
         Ok(y - start_y + PADDING)
+    }
+
+    /// Convert X11 keycode to character
+    /// This is a simplified mapping for US QWERTY keyboard
+    fn keycode_to_char(&self, keycode: u8, state: u16) -> Option<char> {
+        let shift = (state & 1) != 0; // Shift modifier
+
+        // Map X11 keycodes to characters (US QWERTY layout)
+        // These keycodes are offset by 8 from Linux input keycodes
+        let ch = match keycode {
+            // Number row
+            10 => if shift { '!' } else { '1' },
+            11 => if shift { '@' } else { '2' },
+            12 => if shift { '#' } else { '3' },
+            13 => if shift { '$' } else { '4' },
+            14 => if shift { '%' } else { '5' },
+            15 => if shift { '^' } else { '6' },
+            16 => if shift { '&' } else { '7' },
+            17 => if shift { '*' } else { '8' },
+            18 => if shift { '(' } else { '9' },
+            19 => if shift { ')' } else { '0' },
+            20 => if shift { '_' } else { '-' },
+            21 => if shift { '+' } else { '=' },
+
+            // Top row (QWERTY)
+            24 => if shift { 'Q' } else { 'q' },
+            25 => if shift { 'W' } else { 'w' },
+            26 => if shift { 'E' } else { 'e' },
+            27 => if shift { 'R' } else { 'r' },
+            28 => if shift { 'T' } else { 't' },
+            29 => if shift { 'Y' } else { 'y' },
+            30 => if shift { 'U' } else { 'u' },
+            31 => if shift { 'I' } else { 'i' },
+            32 => if shift { 'O' } else { 'o' },
+            33 => if shift { 'P' } else { 'p' },
+            34 => if shift { '{' } else { '[' },
+            35 => if shift { '}' } else { ']' },
+
+            // Home row (ASDF)
+            38 => if shift { 'A' } else { 'a' },
+            39 => if shift { 'S' } else { 's' },
+            40 => if shift { 'D' } else { 'd' },
+            41 => if shift { 'F' } else { 'f' },
+            42 => if shift { 'G' } else { 'g' },
+            43 => if shift { 'H' } else { 'h' },
+            44 => if shift { 'J' } else { 'j' },
+            45 => if shift { 'K' } else { 'k' },
+            46 => if shift { 'L' } else { 'l' },
+            47 => if shift { ':' } else { ';' },
+            48 => if shift { '"' } else { '\'' },
+            51 => if shift { '|' } else { '\\' },
+
+            // Bottom row (ZXCV)
+            52 => if shift { 'Z' } else { 'z' },
+            53 => if shift { 'X' } else { 'x' },
+            54 => if shift { 'C' } else { 'c' },
+            55 => if shift { 'V' } else { 'v' },
+            56 => if shift { 'B' } else { 'b' },
+            57 => if shift { 'N' } else { 'n' },
+            58 => if shift { 'M' } else { 'm' },
+            59 => if shift { '<' } else { ',' },
+            60 => if shift { '>' } else { '.' },
+            61 => if shift { '?' } else { '/' },
+
+            // Space
+            65 => ' ',
+
+            // Grave/tilde
+            49 => if shift { '~' } else { '`' },
+
+            _ => return None,
+        };
+        Some(ch)
     }
 
     /// Draw a rounded rectangle path
@@ -1415,6 +1604,25 @@ impl PopupPanel {
             }
         }
 
+        // Periodic WiFi refresh while list is expanded (every 10 seconds)
+        if self.expanded == ExpandedSection::WiFi {
+            const WIFI_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+            let should_refresh = self.last_wifi_scan
+                .map(|last| last.elapsed() >= WIFI_REFRESH_INTERVAL)
+                .unwrap_or(true);
+
+            if should_refresh {
+                if let Some(ref mut network) = self.network {
+                    debug!("Periodic WiFi refresh");
+                    if let Err(e) = network.scan_networks() {
+                        debug!("WiFi refresh failed: {}", e);
+                    }
+                    self.last_wifi_scan = Some(std::time::Instant::now());
+                    self.render()?;
+                }
+            }
+        }
+
         while let Some(event) = self.conn.poll_event()? {
             match event {
                 x11rb::protocol::Event::Expose(e) => {
@@ -1431,11 +1639,56 @@ impl PopupPanel {
                     }
                 }
                 x11rb::protocol::Event::KeyPress(e) => {
-                    // Escape key (keycode 9)
-                    if e.detail == 9 {
-                        debug!("Escape pressed, hiding panel");
-                        self.hide()?;
-                        return Ok(true);
+                    // Handle password entry keyboard input
+                    if self.password_entry_ssid.is_some() {
+                        match e.detail {
+                            9 => {
+                                // Escape - cancel password entry
+                                debug!("Escape pressed, cancelling password entry");
+                                self.password_entry_ssid = None;
+                                self.password_text.clear();
+                                self.update_panel_height()?;
+                                self.render()?;
+                            }
+                            36 => {
+                                // Enter - submit password
+                                if !self.password_text.is_empty() {
+                                    let ssid = self.password_entry_ssid.take().unwrap();
+                                    let password = std::mem::take(&mut self.password_text);
+                                    info!("Connecting to '{}' with password", ssid);
+
+                                    if let Some(ref mut network) = self.network {
+                                        if let Err(e) = network.connect_with_password(&ssid, &password) {
+                                            warn!("WiFi connect with password failed: {}", e);
+                                        }
+                                        // Refresh network list
+                                        let _ = network.scan_networks();
+                                        self.last_wifi_scan = Some(std::time::Instant::now());
+                                    }
+                                    self.update_panel_height()?;
+                                    self.render()?;
+                                }
+                            }
+                            22 => {
+                                // Backspace - delete last character
+                                self.password_text.pop();
+                                self.render()?;
+                            }
+                            _ => {
+                                // Try to convert keycode to character
+                                if let Some(ch) = self.keycode_to_char(e.detail, e.state.into()) {
+                                    self.password_text.push(ch);
+                                    self.render()?;
+                                }
+                            }
+                        }
+                    } else {
+                        // Normal mode - Escape hides panel
+                        if e.detail == 9 {
+                            debug!("Escape pressed, hiding panel");
+                            self.hide()?;
+                            return Ok(true);
+                        }
                     }
                 }
                 x11rb::protocol::Event::ButtonPress(e) => {
@@ -1450,19 +1703,47 @@ impl PopupPanel {
                     }
 
                     // Button 4 = scroll up, Button 5 = scroll down
-                    if e.detail == 4 && self.expanded == ExpandedSection::WiFi {
-                        if self.wifi_scroll_offset > 0 {
-                            self.wifi_scroll_offset -= 1;
-                            self.render()?;
+                    if e.detail == 4 {
+                        // Scroll up
+                        match self.expanded {
+                            ExpandedSection::WiFi => {
+                                if self.wifi_scroll_offset > 0 {
+                                    self.wifi_scroll_offset -= 1;
+                                    self.render()?;
+                                }
+                            }
+                            ExpandedSection::Bluetooth => {
+                                if self.bluetooth_scroll_offset > 0 {
+                                    self.bluetooth_scroll_offset -= 1;
+                                    self.render()?;
+                                }
+                            }
+                            ExpandedSection::None => {}
                         }
-                    } else if e.detail == 5 && self.expanded == ExpandedSection::WiFi {
-                        let network_count = self.network.as_ref()
-                            .map(|n| n.access_points().len())
-                            .unwrap_or(0);
-                        let max_scroll = network_count.saturating_sub(5);
-                        if self.wifi_scroll_offset < max_scroll {
-                            self.wifi_scroll_offset += 1;
-                            self.render()?;
+                    } else if e.detail == 5 {
+                        // Scroll down
+                        match self.expanded {
+                            ExpandedSection::WiFi => {
+                                let network_count = self.network.as_ref()
+                                    .map(|n| n.access_points().len())
+                                    .unwrap_or(0);
+                                let max_scroll = network_count.saturating_sub(5);
+                                if self.wifi_scroll_offset < max_scroll {
+                                    self.wifi_scroll_offset += 1;
+                                    self.render()?;
+                                }
+                            }
+                            ExpandedSection::Bluetooth => {
+                                let device_count = self.bluetooth.as_ref()
+                                    .map(|b| b.devices().len())
+                                    .unwrap_or(0);
+                                let max_scroll = device_count.saturating_sub(5);
+                                if self.bluetooth_scroll_offset < max_scroll {
+                                    self.bluetooth_scroll_offset += 1;
+                                    self.render()?;
+                                }
+                            }
+                            ExpandedSection::None => {}
                         }
                     }
 
@@ -1646,6 +1927,7 @@ impl PopupPanel {
                             let aps = network.access_points();
                             info!("WiFi picker expanded, {} networks", aps.len());
                         }
+                        self.last_wifi_scan = Some(std::time::Instant::now());
                     }
                     self.update_panel_height()?;
                 }
@@ -1655,6 +1937,7 @@ impl PopupPanel {
                 if self.expanded == ExpandedSection::Bluetooth {
                     // Collapse
                     self.expanded = ExpandedSection::None;
+                    self.bluetooth_scroll_offset = 0;
                     info!("Bluetooth picker collapsed");
                 } else {
                     // Expand and scan
@@ -1716,6 +1999,7 @@ impl PopupPanel {
                             let aps = network.access_points();
                             info!("WiFi picker expanded, {} networks", aps.len());
                         }
+                        self.last_wifi_scan = Some(std::time::Instant::now());
                     }
                     // Panel height may change after scan results
                     self.update_panel_height()?;
@@ -1724,6 +2008,7 @@ impl PopupPanel {
             "bluetooth" => {
                 if self.expanded == ExpandedSection::Bluetooth {
                     self.expanded = ExpandedSection::None;
+                    self.bluetooth_scroll_offset = 0;
                     info!("Bluetooth picker collapsed");
                     self.update_panel_height()?;
                 } else {
@@ -1801,7 +2086,7 @@ impl PopupPanel {
             ExpandedSection::WiFi => {
                 // id is the SSID
                 if let Some(ref mut network) = self.network {
-                    let aps = network.access_points();
+                    let _aps = network.access_points();
                     // Check if already connected to this network
                     let is_connected = network.connected_ssid()
                         .map(|s| s == id)
@@ -1813,15 +2098,29 @@ impl PopupPanel {
                         if let Err(e) = network.disconnect() {
                             warn!("WiFi disconnect failed: {}", e);
                         }
+                        // Refresh network list
+                        let _ = network.scan_networks();
+                        self.last_wifi_scan = Some(std::time::Instant::now());
                     } else {
-                        // Connect to the network
-                        info!("Connecting to WiFi network: {}", id);
-                        if let Err(e) = network.connect_to_network(id) {
-                            warn!("WiFi connect failed: {}", e);
+                        // Check if network needs password
+                        if network.network_needs_password(id) {
+                            info!("Network '{}' requires password, showing entry", id);
+                            self.password_entry_ssid = Some(id.to_string());
+                            self.password_text.clear();
+                            self.update_panel_height()?;
+                            self.render()?;
+                            return Ok(());
+                        } else {
+                            // Connect to the network (open or saved credentials)
+                            info!("Connecting to WiFi network: {}", id);
+                            if let Err(e) = network.connect_to_network(id) {
+                                warn!("WiFi connect failed: {}", e);
+                            }
+                            // Refresh network list
+                            let _ = network.scan_networks();
+                            self.last_wifi_scan = Some(std::time::Instant::now());
                         }
                     }
-                    // Refresh network list
-                    let _ = network.scan_networks();
                 }
             }
             ExpandedSection::Bluetooth => {
