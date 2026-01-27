@@ -590,32 +590,27 @@ impl NetworkModule {
 
     /// Connect to a WiFi network with a password
     pub fn connect_with_password(&mut self, ssid: &str, password: &str) -> Result<()> {
-        let conn = match &self.conn {
-            Some(c) => c,
-            None => anyhow::bail!("No D-Bus connection"),
-        };
-
         if !self.state.wifi_available || !self.state.wifi_enabled {
             anyhow::bail!("WiFi not available or not enabled");
         }
 
         info!("Connecting to WiFi network with password: {}", ssid);
 
-        // Get the WiFi device
-        let wifi_device = match self.get_wifi_device(conn) {
-            Some(d) => d,
-            None => anyhow::bail!("No WiFi device found"),
-        };
+        // Use nmcli which handles secrets properly
+        // nmcli device wifi connect <SSID> password <password>
+        let output = std::process::Command::new("nmcli")
+            .args(["device", "wifi", "connect", ssid, "password", password])
+            .output()
+            .context("Failed to run nmcli")?;
 
-        // Find the access point to get security info
-        let ap = self.state.access_points.iter()
-            .find(|ap| ap.ssid == ssid)
-            .ok_or_else(|| anyhow::anyhow!("Access point not found: {}", ssid))?;
-
-        let ap_path = ap.path.clone();
-        let security = ap.security.clone();
-
-        self.add_and_activate_connection_with_password(conn, ssid, password, &security, &wifi_device, &ap_path)
+        if output.status.success() {
+            info!("Successfully connected to {}", ssid);
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!("nmcli failed: {}", stderr);
+            anyhow::bail!("Failed to connect: {}", stderr.trim())
+        }
     }
 
     /// Check if a network requires a password (is secured)
@@ -813,6 +808,10 @@ impl NetworkModule {
         let mut connection: HashMap<&str, Value> = HashMap::new();
         connection.insert("type", Value::Str("802-11-wireless".into()));
         connection.insert("id", Value::Str(ssid.into()));
+        // Set as user-owned connection so secrets can be saved without root
+        let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+        let permissions = vec![Value::Str(format!("user:{}:", user).into())];
+        connection.insert("permissions", Value::Array(permissions.into()));
 
         let mut wireless: HashMap<&str, Value> = HashMap::new();
         // SSID as byte array
@@ -831,6 +830,9 @@ impl NetworkModule {
         };
         wireless_security.insert("key-mgmt", Value::Str(key_mgmt.into()));
         wireless_security.insert("psk", Value::Str(password.into()));
+        // Set psk-flags to 0 (NM_SETTING_SECRET_FLAG_NONE) so NM uses the embedded password
+        // instead of asking a secret agent
+        wireless_security.insert("psk-flags", Value::U32(0));
 
         // Also set security reference in wireless settings
         wireless.insert("security", Value::Str("802-11-wireless-security".into()));

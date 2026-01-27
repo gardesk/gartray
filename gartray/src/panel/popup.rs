@@ -1374,15 +1374,20 @@ impl PopupPanel {
         self.draw_rounded_rect(ctx, input_x, y, input_width, input_height, 4.0);
         ctx.stroke().ok();
 
-        // Password text (masked with dots)
+        // Password text (masked with asterisks)
         ctx.set_source_rgba(0.9, 0.9, 0.9, 1.0);
         ctx.set_font_size(14.0);
-        let masked: String = "●".repeat(self.password_text.len());
+        let masked: String = "*".repeat(self.password_text.len());
         ctx.move_to(input_x + 8.0, y + input_height / 2.0 + 5.0);
         ctx.show_text(&masked).ok();
 
-        // Cursor (blinking could be added later)
-        let cursor_x = input_x + 8.0 + (self.password_text.len() as f64 * 10.0);
+        // Cursor - measure actual text width for accurate positioning
+        let text_width = if masked.is_empty() {
+            0.0
+        } else {
+            ctx.text_extents(&masked).map(|e| e.x_advance()).unwrap_or(0.0)
+        };
+        let cursor_x = input_x + 8.0 + text_width;
         ctx.set_source_rgba(0.9, 0.9, 0.9, 1.0);
         ctx.rectangle(cursor_x, y + 6.0, 2.0, input_height - 12.0);
         ctx.fill().ok();
