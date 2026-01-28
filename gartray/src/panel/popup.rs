@@ -136,6 +136,12 @@ pub struct PopupPanel {
     previous_focus: Option<u32>,
     /// Time when panel was shown (for grace period on FocusOut)
     show_time: Option<std::time::Instant>,
+    /// Whether we need to retry grabbing the pointer (grab failed during show)
+    grab_pending: bool,
+    /// Position where toggle was triggered (to ignore clicks near it during grace period)
+    trigger_pos: Option<(i32, i32)>,
+    /// Whether we've seen the ButtonRelease from the opening click (stop ignoring after this)
+    trigger_release_seen: bool,
 }
 
 impl PopupPanel {
@@ -269,6 +275,9 @@ impl PopupPanel {
             last_wifi_scan: None,
             previous_focus: None,
             show_time: None,
+            grab_pending: false,
+            trigger_pos: None,
+            trigger_release_seen: false,
         })
     }
 
@@ -279,6 +288,16 @@ impl PopupPanel {
             // Destroy old window
             self.window = None;
             self.surface = None;
+        }
+
+        // Save trigger position to ignore clicks near it during grace period
+        // This prevents the "bounce" where clicking gear icon triggers immediate close
+        if x != 0 || y != 0 {
+            self.trigger_pos = Some((x, y));
+            self.trigger_release_seen = false;  // Reset - haven't seen ButtonRelease yet
+        } else {
+            self.trigger_pos = None;
+            self.trigger_release_seen = true;  // No trigger tracking, allow all clicks
         }
 
         // Just refresh the enabled state (fast, no scan)
@@ -292,9 +311,6 @@ impl PopupPanel {
             window.map()?;
             self.conn.flush()?;
             info!("Panel window {} mapped at ({}, {})", window.id(), self.pos_x, self.pos_y);
-
-            // Record show time for FocusOut grace period
-            self.show_time = Some(std::time::Instant::now());
 
             // Save current focus before taking it
             if let Ok(focus_reply) = self.conn.inner().get_input_focus()?.reply() {
@@ -346,8 +362,18 @@ impl PopupPanel {
             }
             if !grab_success {
                 debug!("Pointer grab failed after retries, click-outside-to-close may not work");
+                // Grab likely failed because garbar has implicit button grab from the click
+                // that triggered this show. We'll rely on FocusOut as fallback for dismissal.
+                // Store flag to retry grab on next event poll
+                self.grab_pending = true;
+            } else {
+                self.grab_pending = false;
             }
             self.conn.flush()?;
+
+            // Record show time AFTER grab attempts for accurate grace period
+            // (grab retries can take up to 250ms which would invalidate grace period)
+            self.show_time = Some(std::time::Instant::now());
         }
 
         self.visible = true;
@@ -376,6 +402,9 @@ impl PopupPanel {
         }
 
         self.visible = false;
+        self.grab_pending = false;
+        self.trigger_pos = None;
+        self.trigger_release_seen = false;
         debug!("Panel hidden");
         Ok(())
     }
@@ -1662,6 +1691,38 @@ impl PopupPanel {
             }
         }
 
+        // Retry grabbing pointer if previous grab failed (garbar may have released button)
+        if self.grab_pending && self.visible {
+            if let Some(ref window) = self.window {
+                match self.conn.inner().grab_pointer(
+                    false,
+                    window.id(),
+                    EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
+                    GrabMode::ASYNC,
+                    GrabMode::ASYNC,
+                    x11rb::NONE,
+                    x11rb::NONE,
+                    CURRENT_TIME,
+                ) {
+                    Ok(cookie) => {
+                        if let Ok(reply) = cookie.reply() {
+                            use x11rb::protocol::xproto::GrabStatus;
+                            if reply.status == GrabStatus::SUCCESS {
+                                debug!("Deferred pointer grab succeeded");
+                                self.grab_pending = false;
+                            }
+                            // If still failing, keep trying on next poll
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Deferred grab_pointer error: {}", e);
+                        self.grab_pending = false; // Give up on persistent errors
+                    }
+                }
+                let _ = self.conn.flush();
+            }
+        }
+
         // Periodic WiFi refresh while list is expanded (every 10 seconds)
         if self.expanded == ExpandedSection::WiFi {
             const WIFI_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
@@ -1695,9 +1756,10 @@ impl PopupPanel {
                         if e.mode == NotifyMode::NORMAL {
                             // Grace period: ignore FocusOut shortly after showing
                             // This prevents hiding when garbar's click causes focus bounce
+                            // 300ms accounts for grab retry time + buffer
                             if let Some(show_time) = self.show_time {
                                 let elapsed = show_time.elapsed();
-                                if elapsed < std::time::Duration::from_millis(150) {
+                                if elapsed < std::time::Duration::from_millis(300) {
                                     debug!("Ignoring FocusOut during grace period ({}ms)", elapsed.as_millis());
                                     continue;
                                 }
@@ -1797,6 +1859,26 @@ impl PopupPanel {
 
                     // Check if click is outside panel bounds (click-outside-to-close)
                     if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+                        // During grace period, ignore clicks near the trigger position
+                        // BUT only until we've seen the ButtonRelease from the opening click
+                        // This prevents "bounce" while still allowing intentional close clicks
+                        if !self.trigger_release_seen {
+                            if let (Some(show_time), Some((trigger_x, trigger_y))) = (self.show_time, self.trigger_pos) {
+                                let elapsed = show_time.elapsed();
+                                if elapsed < std::time::Duration::from_millis(500) {
+                                    // Check if click is near trigger position (within 50px)
+                                    let abs_x = e.root_x as i32;
+                                    let abs_y = e.root_y as i32;
+                                    let dx = (abs_x - trigger_x).abs();
+                                    let dy = (abs_y - trigger_y).abs();
+                                    if dx < 50 && dy < 50 {
+                                        debug!("Ignoring click near trigger ({}, {}) during grace period ({}ms)",
+                                               abs_x, abs_y, elapsed.as_millis());
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
                         debug!("Click outside panel at ({}, {}), closing", x, y);
                         self.hide()?;
                         return Ok(true);
@@ -1853,6 +1935,20 @@ impl PopupPanel {
                     }
                 }
                 x11rb::protocol::Event::ButtonRelease(e) => {
+                    // Track ButtonRelease near trigger position to enable subsequent close clicks
+                    if !self.trigger_release_seen && e.detail == 1 {
+                        if let Some((trigger_x, trigger_y)) = self.trigger_pos {
+                            let abs_x = e.root_x as i32;
+                            let abs_y = e.root_y as i32;
+                            let dx = (abs_x - trigger_x).abs();
+                            let dy = (abs_y - trigger_y).abs();
+                            if dx < 50 && dy < 50 {
+                                debug!("ButtonRelease near trigger ({}, {}), enabling close clicks", abs_x, abs_y);
+                                self.trigger_release_seen = true;
+                            }
+                        }
+                    }
+
                     if self.window.as_ref().map(|w| w.id()) == Some(e.event) && e.detail == 1 {
                         // Check for click action (hold action fires proactively in process_events)
                         if let Some(press_start) = self.press_start.take() {

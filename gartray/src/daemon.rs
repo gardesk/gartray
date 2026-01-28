@@ -95,6 +95,8 @@ pub struct Daemon {
     running: bool,
     /// Shared visibility state for IPC sync
     visibility: PanelVisibility,
+    /// Time when panel was last hidden (for debouncing toggle commands)
+    last_hide_time: Option<std::time::Instant>,
 }
 
 impl Daemon {
@@ -126,6 +128,7 @@ impl Daemon {
             panel,
             running: true,
             visibility,
+            last_hide_time: None,
         })
     }
 
@@ -205,9 +208,23 @@ impl Daemon {
             Command::Toggle { x, y } => {
                 if let Some(ref mut panel) = self.panel {
                     let was_visible = panel.is_visible();
+
+                    // Debounce: if panel was just hidden (within 300ms), ignore toggle to show
+                    // This prevents "bounce" when click-outside on gear triggers immediate re-toggle
+                    if !was_visible {
+                        if let Some(hide_time) = self.last_hide_time {
+                            let elapsed = hide_time.elapsed();
+                            if elapsed < std::time::Duration::from_millis(300) {
+                                info!("Panel toggle ignored (debounce {}ms since hide)", elapsed.as_millis());
+                                return;
+                            }
+                        }
+                    }
+
                     info!("Panel toggle at ({}, {}): {} -> {}", x, y, was_visible, !was_visible);
                     if was_visible {
                         let _ = panel.hide();
+                        self.last_hide_time = Some(std::time::Instant::now());
                         // Set visibility to false BEFORE any events can change it
                         self.visibility.store(false, Ordering::SeqCst);
                     } else {
@@ -249,6 +266,7 @@ impl Daemon {
             let is_visible = panel.is_visible();
             if was_visible && !is_visible {
                 self.visibility.store(false, Ordering::SeqCst);
+                self.last_hide_time = Some(std::time::Instant::now());
             }
         }
 
