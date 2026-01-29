@@ -191,17 +191,24 @@ impl Daemon {
         debug!("Handling IPC command: {:?}", cmd);
         match cmd {
             Command::Show { x, y } => {
-                info!("Showing panel at ({}, {})", x, y);
                 if let Some(ref mut panel) = self.panel {
-                    let _ = panel.show(x, y);
-                    let _ = panel.render();
+                    if panel.is_visible() {
+                        debug!("Panel already visible, ignoring Show command");
+                    } else {
+                        info!("Showing panel at ({}, {})", x, y);
+                        let _ = panel.show(x, y);
+                        let _ = panel.render();
+                    }
                 }
                 self.update_visibility();
             }
             Command::Hide => {
                 info!("Hiding panel");
                 if let Some(ref mut panel) = self.panel {
-                    let _ = panel.hide();
+                    if panel.is_visible() {
+                        let _ = panel.hide();
+                        self.last_hide_time = Some(std::time::Instant::now());
+                    }
                 }
                 self.update_visibility();
             }
