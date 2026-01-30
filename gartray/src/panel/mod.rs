@@ -10,6 +10,7 @@ pub mod power;
 pub mod network;
 pub mod bluetooth;
 pub mod dnd;
+pub mod eap;
 
 pub use popup::PopupPanel;
 pub use volume::VolumeModule;
