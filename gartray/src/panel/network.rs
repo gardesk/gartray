@@ -7,6 +7,8 @@ use tracing::{info, warn, debug};
 use zbus::blocking::Connection;
 use zbus::zvariant::Value;
 
+use super::eap::EapFormState;
+
 /// WiFi access point info
 #[derive(Debug, Clone)]
 pub struct AccessPoint {
@@ -18,6 +20,8 @@ pub struct AccessPoint {
     pub connected: bool,
     /// Security type (none, wpa, wpa2, etc.)
     pub security: String,
+    /// Whether this is an enterprise (802.1X) network
+    pub is_enterprise: bool,
     /// D-Bus object path for this AP
     pub path: String,
 }
@@ -420,13 +424,15 @@ impl NetworkModule {
         let strength = self.get_ap_strength(conn, ap_path).unwrap_or(0);
 
         // Get security flags
-        let security = self.get_ap_security(conn, ap_path).unwrap_or_else(|| "none".to_string());
+        let (security, is_enterprise) = self.get_ap_security(conn, ap_path)
+            .unwrap_or_else(|| ("Open".to_string(), false));
 
         Ok(AccessPoint {
             ssid,
             strength,
             connected: false, // Will be set later
             security,
+            is_enterprise,
             path: ap_path.to_string(),
         })
     }
@@ -496,8 +502,10 @@ impl NetworkModule {
         }
     }
 
-    /// Get AP security type
-    fn get_ap_security(&self, conn: &Connection, ap_path: &str) -> Option<String> {
+    /// Get AP security type and whether it's an enterprise network
+    fn get_ap_security(&self, conn: &Connection, ap_path: &str) -> Option<(String, bool)> {
+        const KEY_MGMT_802_1X: u32 = 0x200;
+
         // WpaFlags property
         let reply: zbus::Message = conn.call_method(
             Some("org.freedesktop.NetworkManager"),
@@ -520,13 +528,17 @@ impl NetworkModule {
         // RsnFlags (WPA2)
         let rsn_flags = self.get_ap_rsn_flags(conn, ap_path).unwrap_or(0);
 
-        if rsn_flags > 0 {
-            Some("WPA2".to_string())
+        let is_enterprise = (wpa_flags & KEY_MGMT_802_1X) != 0 || (rsn_flags & KEY_MGMT_802_1X) != 0;
+
+        let security = if rsn_flags > 0 {
+            if is_enterprise { "WPA2-Ent" } else { "WPA2" }
         } else if wpa_flags > 0 {
-            Some("WPA".to_string())
+            if is_enterprise { "WPA-Ent" } else { "WPA" }
         } else {
-            Some("Open".to_string())
-        }
+            "Open"
+        };
+
+        Some((security.to_string(), is_enterprise))
     }
 
     /// Get AP RSN (WPA2) flags
@@ -627,6 +639,117 @@ impl NetworkModule {
             .find(|ap| ap.ssid == ssid)
             .map(|ap| ap.security != "Open")
             .unwrap_or(false)
+    }
+
+    /// Check if a network requires EAP (enterprise) authentication
+    pub fn network_needs_eap(&self, ssid: &str) -> bool {
+        if let Some(ref conn) = self.conn {
+            if self.find_connection_for_ssid(conn, ssid).is_some() {
+                return false;
+            }
+        }
+        self.state.access_points.iter()
+            .find(|ap| ap.ssid == ssid)
+            .map(|ap| ap.is_enterprise)
+            .unwrap_or(false)
+    }
+
+    /// Connect to an enterprise WiFi network with EAP credentials
+    pub fn connect_with_eap(&mut self, form: &EapFormState) -> Result<()> {
+        if !self.state.wifi_available || !self.state.wifi_enabled {
+            anyhow::bail!("WiFi not available or not enabled");
+        }
+
+        info!("Connecting to enterprise WiFi: {} ({:?})", form.ssid, form.eap_method);
+
+        let conn = match &self.conn {
+            Some(c) => c,
+            None => anyhow::bail!("No D-Bus connection"),
+        };
+
+        let wifi_device = match self.get_wifi_device(conn) {
+            Some(d) => d,
+            None => anyhow::bail!("No WiFi device found"),
+        };
+
+        let ap_path = self.state.access_points.iter()
+            .find(|ap| ap.ssid == form.ssid)
+            .map(|ap| ap.path.clone())
+            .ok_or_else(|| anyhow::anyhow!("Access point not found: {}", form.ssid))?;
+
+        self.add_and_activate_eap_connection(conn, form, &wifi_device, &ap_path)
+    }
+
+    /// Add and activate a new EAP/802.1X connection
+    fn add_and_activate_eap_connection(
+        &self,
+        conn: &Connection,
+        form: &EapFormState,
+        device_path: &str,
+        ap_path: &str,
+    ) -> Result<()> {
+        use std::collections::HashMap;
+        use zbus::zvariant::ObjectPath;
+
+        let mut connection: HashMap<&str, Value> = HashMap::new();
+        connection.insert("type", Value::Str("802-11-wireless".into()));
+        connection.insert("id", Value::Str(form.ssid.clone().into()));
+        let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+        let permissions = vec![Value::Str(format!("user:{}:", user).into())];
+        connection.insert("permissions", Value::Array(permissions.into()));
+
+        let mut wireless: HashMap<&str, Value> = HashMap::new();
+        let ssid_bytes: Vec<Value> = form.ssid.bytes().map(Value::U8).collect();
+        wireless.insert("ssid", Value::Array(ssid_bytes.into()));
+        wireless.insert("mode", Value::Str("infrastructure".into()));
+        wireless.insert("security", Value::Str("802-11-wireless-security".into()));
+
+        let mut wireless_security: HashMap<&str, Value> = HashMap::new();
+        wireless_security.insert("key-mgmt", Value::Str("wpa-eap".into()));
+
+        let mut eap_settings: HashMap<&str, Value> = HashMap::new();
+        let eap_methods = vec![Value::Str(form.eap_method.as_str().into())];
+        eap_settings.insert("eap", Value::Array(eap_methods.into()));
+        eap_settings.insert("identity", Value::Str(form.identity.clone().into()));
+        eap_settings.insert("password", Value::Str(form.password.clone().into()));
+        eap_settings.insert("password-flags", Value::U32(0));
+
+        if !form.anonymous_identity.is_empty() {
+            eap_settings.insert("anonymous-identity", Value::Str(form.anonymous_identity.clone().into()));
+        }
+
+        if !form.ca_cert_path.is_empty() {
+            let ca_path = if form.ca_cert_path.starts_with("file://") {
+                form.ca_cert_path.clone()
+            } else {
+                format!("file://{}", form.ca_cert_path)
+            };
+            let ca_bytes: Vec<Value> = ca_path.bytes().map(Value::U8).collect();
+            eap_settings.insert("ca-cert", Value::Array(ca_bytes.into()));
+        }
+
+        eap_settings.insert("phase2-auth", Value::Str(form.phase2_auth.as_str().into()));
+
+        let mut settings: HashMap<&str, HashMap<&str, Value>> = HashMap::new();
+        settings.insert("connection", connection);
+        settings.insert("802-11-wireless", wireless);
+        settings.insert("802-11-wireless-security", wireless_security);
+        settings.insert("802-1x", eap_settings);
+
+        conn.call_method(
+            Some("org.freedesktop.NetworkManager"),
+            "/org/freedesktop/NetworkManager",
+            Some("org.freedesktop.NetworkManager"),
+            "AddAndActivateConnection",
+            &(
+                settings,
+                ObjectPath::from_str_unchecked(device_path),
+                ObjectPath::from_str_unchecked(ap_path),
+            ),
+        )?;
+
+        info!("AddAndActivateConnection with EAP requested for: {}", form.ssid);
+        Ok(())
     }
 
     /// Disconnect from current WiFi network
