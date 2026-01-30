@@ -1723,25 +1723,6 @@ impl PopupPanel {
             }
         }
 
-        // Periodic WiFi refresh while list is expanded (every 10 seconds)
-        if self.expanded == ExpandedSection::WiFi {
-            const WIFI_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
-            let should_refresh = self.last_wifi_scan
-                .map(|last| last.elapsed() >= WIFI_REFRESH_INTERVAL)
-                .unwrap_or(true);
-
-            if should_refresh {
-                if let Some(ref mut network) = self.network {
-                    debug!("Periodic WiFi refresh");
-                    if let Err(e) = network.scan_networks() {
-                        debug!("WiFi refresh failed: {}", e);
-                    }
-                    self.last_wifi_scan = Some(std::time::Instant::now());
-                    self.render()?;
-                }
-            }
-        }
-
         while let Some(event) = self.conn.poll_event()? {
             match event {
                 x11rb::protocol::Event::Expose(e) => {
@@ -2058,6 +2039,26 @@ impl PopupPanel {
                     self.drag_value = ((x - row.slider_x) / row.slider_width).clamp(0.0, 1.0);
                     self.render()?;
                     return Ok(());
+                }
+            }
+        }
+
+        // Periodic WiFi refresh while list is expanded (every 10 seconds)
+        // Done AFTER event processing to avoid blocking click-outside detection
+        if self.expanded == ExpandedSection::WiFi {
+            const WIFI_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+            let should_refresh = self.last_wifi_scan
+                .map(|last| last.elapsed() >= WIFI_REFRESH_INTERVAL)
+                .unwrap_or(true);
+
+            if should_refresh {
+                if let Some(ref mut network) = self.network {
+                    debug!("Periodic WiFi refresh");
+                    if let Err(e) = network.scan_networks() {
+                        debug!("WiFi refresh failed: {}", e);
+                    }
+                    self.last_wifi_scan = Some(std::time::Instant::now());
+                    self.render()?;
                 }
             }
         }
