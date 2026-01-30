@@ -19,6 +19,7 @@ use crate::panel::power::PowerModule;
 use crate::panel::network::NetworkModule;
 use crate::panel::bluetooth::BluetoothModule;
 use crate::panel::dnd::DndModule;
+use crate::panel::eap::{EapFormState, EapFormField};
 
 /// Monitor information
 #[derive(Debug, Clone)]
@@ -126,6 +127,8 @@ pub struct PopupPanel {
     password_entry_ssid: Option<String>,
     /// WiFi password being typed
     password_text: String,
+    /// Enterprise WiFi (EAP) form state
+    eap_form: Option<EapFormState>,
     /// Last time slider value was applied (for throttling wpctl calls)
     last_slider_apply: Option<std::time::Instant>,
     /// Last time we rendered (for 60fps cap during drag)
@@ -270,6 +273,7 @@ impl PopupPanel {
             bluetooth_scroll_offset: 0,
             password_entry_ssid: None,
             password_text: String::new(),
+            eap_form: None,
             last_slider_apply: None,
             last_render: None,
             last_wifi_scan: None,
@@ -426,21 +430,33 @@ impl PopupPanel {
         const SCROLL_INDICATOR_HEIGHT: u32 = 16;
         const HINT_HEIGHT: u32 = 20;
         const PADDING: u32 = 8;
+        // EAP form height: header(24) + 6 fields(48 each) + error(18) + buttons(40) + hint(16) + padding(8)
+        const EAP_FORM_HEIGHT: u32 = 24 + 48 * 6 + 18 + 40 + 16 + 8;
+        const PASSWORD_ENTRY_HEIGHT: u32 = 28 + 18 + 32 + 8 + 20 + 8; // header + label + input + spacing + hint + padding
 
         let expansion_height = match self.expanded {
             ExpandedSection::None => 0,
             ExpandedSection::WiFi => {
-                let item_count = self.network.as_ref()
-                    .map(|n| n.access_points().len())
-                    .unwrap_or(0) as u32;
-                // At least show space for "No networks" message
-                let visible_items = item_count.min(WIFI_MAX_VISIBLE).max(1);
-                let mut height = visible_items * LIST_ITEM_HEIGHT;
-                // Add space for scroll indicators if list is scrollable
-                if item_count > WIFI_MAX_VISIBLE {
-                    height += SCROLL_INDICATOR_HEIGHT * 2; // up + down indicators
+                // If EAP form is active, use EAP form height
+                if self.eap_form.is_some() {
+                    EAP_FORM_HEIGHT
                 }
-                height + HINT_HEIGHT + PADDING
+                // If password entry is active, use password entry height
+                else if self.password_entry_ssid.is_some() {
+                    PASSWORD_ENTRY_HEIGHT
+                } else {
+                    let item_count = self.network.as_ref()
+                        .map(|n| n.access_points().len())
+                        .unwrap_or(0) as u32;
+                    // At least show space for "No networks" message
+                    let visible_items = item_count.min(WIFI_MAX_VISIBLE).max(1);
+                    let mut height = visible_items * LIST_ITEM_HEIGHT;
+                    // Add space for scroll indicators if list is scrollable
+                    if item_count > WIFI_MAX_VISIBLE {
+                        height += SCROLL_INDICATOR_HEIGHT * 2; // up + down indicators
+                    }
+                    height + HINT_HEIGHT + PADDING
+                }
             }
             ExpandedSection::Bluetooth => {
                 let item_count = self.bluetooth.as_ref()
@@ -1223,6 +1239,11 @@ impl PopupPanel {
 
         self.list_items.clear();
 
+        // If EAP form is active, show EAP form instead of network list
+        if self.eap_form.is_some() {
+            return self.render_eap_form(ctx, start_y);
+        }
+
         // If password entry is active, show password UI instead of network list
         if let Some(ref ssid) = self.password_entry_ssid.clone() {
             return self.render_password_entry(ctx, start_y, &ssid);
@@ -1433,6 +1454,255 @@ impl PopupPanel {
         Ok(y - start_y + PADDING)
     }
 
+    /// Render EAP form for enterprise WiFi, returns height used
+    fn render_eap_form(&self, ctx: &CairoContext, start_y: f64) -> Result<f64> {
+        const PADDING: f64 = 8.0;
+        const FIELD_HEIGHT: f64 = 28.0;
+        const LABEL_HEIGHT: f64 = 16.0;
+        const DROPDOWN_HEIGHT: f64 = 28.0;
+        const BUTTON_HEIGHT: f64 = 32.0;
+        const BUTTON_WIDTH: f64 = 80.0;
+
+        let form = match &self.eap_form {
+            Some(f) => f,
+            None => return Ok(0.0),
+        };
+
+        let mut y = start_y;
+        let input_x = 16.0 + PADDING;
+        let input_width = self.width as f64 - 32.0 - PADDING * 2.0;
+
+        // Network name header
+        ctx.set_source_rgba(0.9, 0.9, 0.9, 1.0);
+        ctx.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
+        ctx.set_font_size(13.0);
+        ctx.move_to(input_x, y + 16.0);
+        let header = format!("Enterprise WiFi: {}", form.ssid);
+        ctx.show_text(&header).ok();
+        y += 24.0;
+
+        // EAP Method dropdown
+        y = self.render_eap_dropdown_field(ctx, y, input_x, input_width, "Authentication:",
+            form.eap_method.display_name(), form.focused_field == EapFormField::EapMethod)?;
+
+        // Username field
+        y = self.render_eap_text_field(ctx, y, input_x, input_width, "Username:",
+            &form.identity, false, form.focused_field == EapFormField::Identity,
+            if form.focused_field == EapFormField::Identity { Some(form.cursor_pos) } else { None },
+            form.cursor_visible())?;
+
+        // Password field
+        y = self.render_eap_text_field(ctx, y, input_x, input_width, "Password:",
+            &form.password, true, form.focused_field == EapFormField::Password,
+            if form.focused_field == EapFormField::Password { Some(form.cursor_pos) } else { None },
+            form.cursor_visible())?;
+
+        // Anonymous identity field (optional)
+        y = self.render_eap_text_field(ctx, y, input_x, input_width, "Anonymous ID (optional):",
+            &form.anonymous_identity, false, form.focused_field == EapFormField::AnonymousIdentity,
+            if form.focused_field == EapFormField::AnonymousIdentity { Some(form.cursor_pos) } else { None },
+            form.cursor_visible())?;
+
+        // CA Certificate path field (optional)
+        y = self.render_eap_text_field(ctx, y, input_x, input_width, "CA Certificate (optional):",
+            &form.ca_cert_path, false, form.focused_field == EapFormField::CaCertPath,
+            if form.focused_field == EapFormField::CaCertPath { Some(form.cursor_pos) } else { None },
+            form.cursor_visible())?;
+
+        // Phase 2 auth dropdown
+        y = self.render_eap_dropdown_field(ctx, y, input_x, input_width, "Inner Auth:",
+            form.phase2_auth.display_name(), form.focused_field == EapFormField::Phase2Auth)?;
+
+        // Error message if any
+        if let Some(ref error) = form.error_message {
+            ctx.set_source_rgba(0.9, 0.3, 0.3, 1.0);
+            ctx.set_font_size(11.0);
+            ctx.move_to(input_x, y + 12.0);
+            ctx.show_text(error).ok();
+            y += 18.0;
+        }
+
+        y += 8.0;
+
+        // Buttons row
+        let button_spacing = 16.0;
+        let total_buttons_width = BUTTON_WIDTH * 2.0 + button_spacing;
+        let buttons_x = (self.width as f64 - total_buttons_width) / 2.0;
+
+        // Connect button
+        let connect_focused = form.focused_field == EapFormField::ConnectButton;
+        self.render_eap_button(ctx, buttons_x, y, BUTTON_WIDTH, BUTTON_HEIGHT,
+            "Connect", connect_focused, true)?;
+
+        // Cancel button
+        let cancel_focused = form.focused_field == EapFormField::CancelButton;
+        self.render_eap_button(ctx, buttons_x + BUTTON_WIDTH + button_spacing, y, BUTTON_WIDTH, BUTTON_HEIGHT,
+            "Cancel", cancel_focused, false)?;
+
+        y += BUTTON_HEIGHT + 8.0;
+
+        // Hint text
+        ctx.set_source_rgba(0.5, 0.5, 0.55, 1.0);
+        ctx.set_font_size(9.0);
+        ctx.move_to(input_x, y + 10.0);
+        ctx.show_text("Tab: next field | Arrows: cycle dropdowns | Enter: connect | Esc: cancel").ok();
+        y += 16.0;
+
+        Ok(y - start_y + PADDING)
+    }
+
+    /// Render a text field for EAP form
+    fn render_eap_text_field(&self, ctx: &CairoContext, y: f64, x: f64, width: f64,
+        label: &str, value: &str, is_password: bool, focused: bool,
+        cursor_pos: Option<usize>, cursor_visible: bool) -> Result<f64> {
+        const LABEL_HEIGHT: f64 = 16.0;
+        const FIELD_HEIGHT: f64 = 28.0;
+
+        let mut current_y = y;
+
+        // Label
+        ctx.set_source_rgba(0.7, 0.7, 0.7, 1.0);
+        ctx.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+        ctx.set_font_size(10.0);
+        ctx.move_to(x, current_y + 11.0);
+        ctx.show_text(label).ok();
+        current_y += LABEL_HEIGHT;
+
+        // Input background
+        ctx.set_source_rgba(0.15, 0.15, 0.18, 1.0);
+        self.draw_rounded_rect(ctx, x, current_y, width, FIELD_HEIGHT, 4.0);
+        ctx.fill().ok();
+
+        // Input border (highlighted if focused)
+        if focused {
+            ctx.set_source_rgba(0.3, 0.6, 0.9, 1.0);
+        } else {
+            ctx.set_source_rgba(0.25, 0.25, 0.3, 1.0);
+        }
+        self.draw_rounded_rect(ctx, x, current_y, width, FIELD_HEIGHT, 4.0);
+        ctx.stroke().ok();
+
+        // Text content
+        ctx.set_source_rgba(0.9, 0.9, 0.9, 1.0);
+        ctx.set_font_size(12.0);
+        let display_text = if is_password {
+            "*".repeat(value.len())
+        } else {
+            value.to_string()
+        };
+        ctx.move_to(x + 8.0, current_y + FIELD_HEIGHT / 2.0 + 4.0);
+        ctx.show_text(&display_text).ok();
+
+        // Cursor if focused and visible
+        if let Some(pos) = cursor_pos {
+            if cursor_visible {
+                let text_before_cursor = if is_password {
+                    "*".repeat(pos)
+                } else {
+                    value.chars().take(pos).collect::<String>()
+                };
+                let text_width = if text_before_cursor.is_empty() {
+                    0.0
+                } else {
+                    ctx.text_extents(&text_before_cursor).map(|e| e.x_advance()).unwrap_or(0.0)
+                };
+                let cursor_x = x + 8.0 + text_width;
+                ctx.set_source_rgba(0.9, 0.9, 0.9, 1.0);
+                ctx.rectangle(cursor_x, current_y + 5.0, 2.0, FIELD_HEIGHT - 10.0);
+                ctx.fill().ok();
+            }
+        }
+
+        current_y += FIELD_HEIGHT + 4.0;
+        Ok(current_y)
+    }
+
+    /// Render a dropdown field for EAP form
+    fn render_eap_dropdown_field(&self, ctx: &CairoContext, y: f64, x: f64, width: f64,
+        label: &str, value: &str, focused: bool) -> Result<f64> {
+        const LABEL_HEIGHT: f64 = 16.0;
+        const DROPDOWN_HEIGHT: f64 = 28.0;
+
+        let mut current_y = y;
+
+        // Label
+        ctx.set_source_rgba(0.7, 0.7, 0.7, 1.0);
+        ctx.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+        ctx.set_font_size(10.0);
+        ctx.move_to(x, current_y + 11.0);
+        ctx.show_text(label).ok();
+        current_y += LABEL_HEIGHT;
+
+        // Dropdown background
+        ctx.set_source_rgba(0.18, 0.18, 0.22, 1.0);
+        self.draw_rounded_rect(ctx, x, current_y, width, DROPDOWN_HEIGHT, 4.0);
+        ctx.fill().ok();
+
+        // Dropdown border (highlighted if focused)
+        if focused {
+            ctx.set_source_rgba(0.3, 0.6, 0.9, 1.0);
+        } else {
+            ctx.set_source_rgba(0.25, 0.25, 0.3, 1.0);
+        }
+        self.draw_rounded_rect(ctx, x, current_y, width, DROPDOWN_HEIGHT, 4.0);
+        ctx.stroke().ok();
+
+        // Value text
+        ctx.set_source_rgba(0.9, 0.9, 0.9, 1.0);
+        ctx.set_font_size(12.0);
+        ctx.move_to(x + 8.0, current_y + DROPDOWN_HEIGHT / 2.0 + 4.0);
+        ctx.show_text(value).ok();
+
+        // Arrow indicator
+        ctx.set_source_rgba(0.6, 0.6, 0.6, 1.0);
+        ctx.set_font_size(10.0);
+        ctx.move_to(x + width - 20.0, current_y + DROPDOWN_HEIGHT / 2.0 + 3.0);
+        ctx.show_text("◀▶").ok();
+
+        current_y += DROPDOWN_HEIGHT + 4.0;
+        Ok(current_y)
+    }
+
+    /// Render a button for EAP form
+    fn render_eap_button(&self, ctx: &CairoContext, x: f64, y: f64, width: f64, height: f64,
+        label: &str, focused: bool, is_primary: bool) -> Result<()> {
+        // Button background
+        if is_primary {
+            if focused {
+                ctx.set_source_rgba(0.3, 0.5, 0.8, 1.0);
+            } else {
+                ctx.set_source_rgba(0.25, 0.45, 0.7, 1.0);
+            }
+        } else {
+            if focused {
+                ctx.set_source_rgba(0.35, 0.35, 0.4, 1.0);
+            } else {
+                ctx.set_source_rgba(0.25, 0.25, 0.3, 1.0);
+            }
+        }
+        self.draw_rounded_rect(ctx, x, y, width, height, 4.0);
+        ctx.fill().ok();
+
+        // Button border if focused
+        if focused {
+            ctx.set_source_rgba(0.5, 0.7, 1.0, 1.0);
+            self.draw_rounded_rect(ctx, x, y, width, height, 4.0);
+            ctx.stroke().ok();
+        }
+
+        // Button text
+        ctx.set_source_rgba(0.95, 0.95, 0.95, 1.0);
+        ctx.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
+        ctx.set_font_size(12.0);
+        let text_width = ctx.text_extents(label).map(|e| e.width()).unwrap_or(0.0);
+        let text_x = x + (width - text_width) / 2.0;
+        let text_y = y + height / 2.0 + 4.0;
+        ctx.move_to(text_x, text_y);
+        ctx.show_text(label).ok();
+
+        Ok(())
+    }
+
     /// Render Bluetooth device list, returns height used
     fn render_bluetooth_list(&mut self, ctx: &CairoContext, start_y: f64) -> Result<f64> {
         const ITEM_HEIGHT: f64 = 32.0;
@@ -1557,6 +1827,155 @@ impl PopupPanel {
 
     /// Convert X11 keycode to character
     /// This is a simplified mapping for US QWERTY keyboard
+    /// Handle keyboard input for EAP form
+    fn handle_eap_keypress(&mut self, keycode: u8, state: u16) -> Result<()> {
+        let shift = (state & 1) != 0;
+
+        match keycode {
+            9 => {
+                // Escape - cancel EAP form
+                debug!("Escape pressed, cancelling EAP form");
+                self.eap_form = None;
+                self.update_panel_height()?;
+                self.render()?;
+            }
+            36 => {
+                // Enter - submit if on connect button, or move to next field
+                if let Some(ref mut form) = self.eap_form {
+                    if form.focused_field == EapFormField::ConnectButton {
+                        // Submit form
+                        if let Some(error) = form.validate() {
+                            form.error_message = Some(error);
+                            self.render()?;
+                        } else {
+                            // Take the form and attempt connection
+                            let form = self.eap_form.take().unwrap();
+                            info!("Connecting to enterprise WiFi: {}", form.ssid);
+
+                            if let Some(ref mut network) = self.network {
+                                if let Err(e) = network.connect_with_eap(&form) {
+                                    warn!("EAP WiFi connect failed: {}", e);
+                                    // Put the form back with error
+                                    let mut form = form;
+                                    form.error_message = Some(format!("Connection failed: {}", e));
+                                    self.eap_form = Some(form);
+                                } else {
+                                    // Success - refresh network list
+                                    let _ = network.scan_networks();
+                                    self.last_wifi_scan = Some(std::time::Instant::now());
+                                }
+                            }
+                            self.update_panel_height()?;
+                            self.render()?;
+                        }
+                    } else if form.focused_field == EapFormField::CancelButton {
+                        // Cancel button activated
+                        self.eap_form = None;
+                        self.update_panel_height()?;
+                        self.render()?;
+                    } else {
+                        // Move to next field
+                        form.focus_next();
+                        self.render()?;
+                    }
+                }
+            }
+            23 => {
+                // Tab - move to next field (Shift+Tab for previous)
+                if let Some(ref mut form) = self.eap_form {
+                    if shift {
+                        form.focus_prev();
+                    } else {
+                        form.focus_next();
+                    }
+                    self.render()?;
+                }
+            }
+            22 => {
+                // Backspace - delete character before cursor
+                if let Some(ref mut form) = self.eap_form {
+                    if form.focused_field.is_text_field() {
+                        form.backspace();
+                        self.render()?;
+                    }
+                }
+            }
+            119 => {
+                // Delete - delete character at cursor
+                if let Some(ref mut form) = self.eap_form {
+                    if form.focused_field.is_text_field() {
+                        form.delete();
+                        self.render()?;
+                    }
+                }
+            }
+            113 => {
+                // Left arrow - cursor left or cycle dropdown
+                if let Some(ref mut form) = self.eap_form {
+                    if form.focused_field.is_text_field() {
+                        form.cursor_left();
+                        self.render()?;
+                    } else if form.focused_field == EapFormField::EapMethod {
+                        form.cycle_eap_method_prev();
+                        self.render()?;
+                    } else if form.focused_field == EapFormField::Phase2Auth {
+                        form.cycle_phase2_prev();
+                        self.render()?;
+                    }
+                }
+            }
+            114 => {
+                // Right arrow - cursor right or cycle dropdown
+                if let Some(ref mut form) = self.eap_form {
+                    if form.focused_field.is_text_field() {
+                        form.cursor_right();
+                        self.render()?;
+                    } else if form.focused_field == EapFormField::EapMethod {
+                        form.cycle_eap_method_next();
+                        self.render()?;
+                    } else if form.focused_field == EapFormField::Phase2Auth {
+                        form.cycle_phase2_next();
+                        self.render()?;
+                    }
+                }
+            }
+            110 => {
+                // Home - cursor to start
+                if let Some(ref mut form) = self.eap_form {
+                    if form.focused_field.is_text_field() {
+                        form.cursor_home();
+                        self.render()?;
+                    }
+                }
+            }
+            115 => {
+                // End - cursor to end
+                if let Some(ref mut form) = self.eap_form {
+                    if form.focused_field.is_text_field() {
+                        form.cursor_end();
+                        self.render()?;
+                    }
+                }
+            }
+            _ => {
+                // Try to convert keycode to character for text fields
+                // First check if we have a text field, then convert keycode
+                let is_text_field = self.eap_form.as_ref()
+                    .map(|f| f.focused_field.is_text_field())
+                    .unwrap_or(false);
+                if is_text_field {
+                    if let Some(ch) = self.keycode_to_char(keycode, state) {
+                        if let Some(ref mut form) = self.eap_form {
+                            form.insert_char(ch);
+                            self.render()?;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn keycode_to_char(&self, keycode: u8, state: u16) -> Option<char> {
         let shift = (state & 1) != 0; // Shift modifier
 
@@ -1782,8 +2201,12 @@ impl PopupPanel {
                     }
                 }
                 x11rb::protocol::Event::KeyPress(e) => {
+                    // Handle EAP form keyboard input
+                    if self.eap_form.is_some() {
+                        self.handle_eap_keypress(e.detail, e.state.into())?;
+                    }
                     // Handle password entry keyboard input
-                    if self.password_entry_ssid.is_some() {
+                    else if self.password_entry_ssid.is_some() {
                         match e.detail {
                             9 => {
                                 // Escape - cancel password entry
@@ -2299,6 +2722,14 @@ impl PopupPanel {
                         let _ = network.scan_networks();
                         self.last_wifi_scan = Some(std::time::Instant::now());
                     } else {
+                        // Check if network needs EAP (enterprise) credentials first
+                        if network.network_needs_eap(id) {
+                            info!("Enterprise network '{}' requires EAP auth, showing form", id);
+                            self.eap_form = Some(EapFormState::new(id.to_string()));
+                            self.update_panel_height()?;
+                            self.render()?;
+                            return Ok(());
+                        }
                         // Check if network needs password
                         if network.network_needs_password(id) {
                             info!("Network '{}' requires password, showing entry", id);
