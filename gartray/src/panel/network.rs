@@ -662,94 +662,54 @@ impl NetworkModule {
 
         info!("Connecting to enterprise WiFi: {} ({:?})", form.ssid, form.eap_method);
 
-        let conn = match &self.conn {
-            Some(c) => c,
-            None => anyhow::bail!("No D-Bus connection"),
-        };
+        // Use nmcli for enterprise WiFi - it handles the complex settings correctly
+        let mut cmd = std::process::Command::new("nmcli");
+        cmd.args([
+            "connection", "add",
+            "type", "wifi",
+            "con-name", &form.ssid,
+            "ssid", &form.ssid,
+            "wifi-sec.key-mgmt", "wpa-eap",
+            "802-1x.eap", form.eap_method.as_str(),
+            "802-1x.identity", &form.identity,
+            "802-1x.password", &form.password,
+            "802-1x.phase2-auth", form.phase2_auth.as_str(),
+        ]);
 
-        let wifi_device = match self.get_wifi_device(conn) {
-            Some(d) => d,
-            None => anyhow::bail!("No WiFi device found"),
-        };
-
-        let ap_path = self.state.access_points.iter()
-            .find(|ap| ap.ssid == form.ssid)
-            .map(|ap| ap.path.clone())
-            .ok_or_else(|| anyhow::anyhow!("Access point not found: {}", form.ssid))?;
-
-        self.add_and_activate_eap_connection(conn, form, &wifi_device, &ap_path)
-    }
-
-    /// Add and activate a new EAP/802.1X connection
-    fn add_and_activate_eap_connection(
-        &self,
-        conn: &Connection,
-        form: &EapFormState,
-        device_path: &str,
-        ap_path: &str,
-    ) -> Result<()> {
-        use std::collections::HashMap;
-        use zbus::zvariant::ObjectPath;
-
-        let mut connection: HashMap<&str, Value> = HashMap::new();
-        connection.insert("type", Value::Str("802-11-wireless".into()));
-        connection.insert("id", Value::Str(form.ssid.clone().into()));
-        let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
-        let permissions = vec![Value::Str(format!("user:{}:", user).into())];
-        connection.insert("permissions", Value::Array(permissions.into()));
-
-        let mut wireless: HashMap<&str, Value> = HashMap::new();
-        let ssid_bytes: Vec<Value> = form.ssid.bytes().map(Value::U8).collect();
-        wireless.insert("ssid", Value::Array(ssid_bytes.into()));
-        wireless.insert("mode", Value::Str("infrastructure".into()));
-        wireless.insert("security", Value::Str("802-11-wireless-security".into()));
-
-        let mut wireless_security: HashMap<&str, Value> = HashMap::new();
-        wireless_security.insert("key-mgmt", Value::Str("wpa-eap".into()));
-
-        let mut eap_settings: HashMap<&str, Value> = HashMap::new();
-        let eap_methods = vec![Value::Str(form.eap_method.as_str().into())];
-        eap_settings.insert("eap", Value::Array(eap_methods.into()));
-        eap_settings.insert("identity", Value::Str(form.identity.clone().into()));
-        eap_settings.insert("password", Value::Str(form.password.clone().into()));
-        eap_settings.insert("password-flags", Value::U32(0));
-
+        // Add optional anonymous identity
         if !form.anonymous_identity.is_empty() {
-            eap_settings.insert("anonymous-identity", Value::Str(form.anonymous_identity.clone().into()));
+            cmd.args(["802-1x.anonymous-identity", &form.anonymous_identity]);
         }
 
+        // Add optional CA certificate
         if !form.ca_cert_path.is_empty() {
-            let ca_path = if form.ca_cert_path.starts_with("file://") {
-                form.ca_cert_path.clone()
-            } else {
-                format!("file://{}", form.ca_cert_path)
-            };
-            let ca_bytes: Vec<Value> = ca_path.bytes().map(Value::U8).collect();
-            eap_settings.insert("ca-cert", Value::Array(ca_bytes.into()));
+            cmd.args(["802-1x.ca-cert", &form.ca_cert_path]);
         }
 
-        eap_settings.insert("phase2-auth", Value::Str(form.phase2_auth.as_str().into()));
+        let output = cmd.output().context("Failed to run nmcli")?;
 
-        let mut settings: HashMap<&str, HashMap<&str, Value>> = HashMap::new();
-        settings.insert("connection", connection);
-        settings.insert("802-11-wireless", wireless);
-        settings.insert("802-11-wireless-security", wireless_security);
-        settings.insert("802-1x", eap_settings);
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!("nmcli connection add failed: {}", stderr);
+            anyhow::bail!("Failed to create connection: {}", stderr.trim());
+        }
 
-        conn.call_method(
-            Some("org.freedesktop.NetworkManager"),
-            "/org/freedesktop/NetworkManager",
-            Some("org.freedesktop.NetworkManager"),
-            "AddAndActivateConnection",
-            &(
-                settings,
-                ObjectPath::from_str_unchecked(device_path),
-                ObjectPath::from_str_unchecked(ap_path),
-            ),
-        )?;
+        info!("Created enterprise WiFi connection profile");
 
-        info!("AddAndActivateConnection with EAP requested for: {}", form.ssid);
-        Ok(())
+        // Now activate the connection
+        let output = std::process::Command::new("nmcli")
+            .args(["connection", "up", &form.ssid])
+            .output()
+            .context("Failed to run nmcli")?;
+
+        if output.status.success() {
+            info!("Successfully connected to {}", form.ssid);
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!("nmcli connection up failed: {}", stderr);
+            anyhow::bail!("Failed to connect: {}", stderr.trim())
+        }
     }
 
     /// Disconnect from current WiFi network
