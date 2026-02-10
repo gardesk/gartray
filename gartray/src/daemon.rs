@@ -97,6 +97,8 @@ pub struct Daemon {
     visibility: PanelVisibility,
     /// Time when panel was last hidden (for debouncing toggle commands)
     last_hide_time: Option<std::time::Instant>,
+    /// Consecutive panel event errors (for detecting dead X11 connection)
+    consecutive_errors: u32,
 }
 
 impl Daemon {
@@ -129,6 +131,7 @@ impl Daemon {
             running: true,
             visibility,
             last_hide_time: None,
+            consecutive_errors: 0,
         })
     }
 
@@ -267,7 +270,15 @@ impl Daemon {
         if let Some(ref mut panel) = self.panel {
             let was_visible = panel.is_visible();
             if let Err(e) = panel.process_events() {
+                self.consecutive_errors += 1;
+                if self.consecutive_errors >= 5 {
+                    warn!("X11 connection lost ({}+ errors), shutting down: {}", self.consecutive_errors, e);
+                    self.running = false;
+                    return Ok(());
+                }
                 warn!("Panel event error: {}", e);
+            } else {
+                self.consecutive_errors = 0;
             }
             // Only update visibility if panel was closed by events (escape/click-outside)
             let is_visible = panel.is_visible();
